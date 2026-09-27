@@ -1,0 +1,323 @@
+---
+- name: Deploy MikroTik CHR VM in KVM
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "msklamik7main01"
+    vm_memory_kb: 262144 # 256 MB — CHR is very lightweight
+    vm_vcpus: 2
+    vm_autostart: false
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/chr-7.24.4.img"
+    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
+
+    # Network — WAN (ether1)
+    wan_bridge: "br0"
+    chr_ip: "192.168.51.200" # WAN IP — used to reach CHR for provisioning
+    chr_prefix: "23"
+    chr_gateway: "192.168.50.250"
+    chr_dns: "192.168.50.250"
+    # Network — LAN (ether2)
+    lan_bridge: "virbr0"
+    lan_ip: "10.0.0.1"
+    lan_prefix: "24"
+
+    # Credentials (default CHR admin has no password on first boot)
+    admin_password: "admin" # Set to non-empty string to configure a secure password
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora/Rocky)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure required packages are installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /nvme/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Validate CHR source image exists
+      ansible.builtin.stat:
+        path: "{{ template_image_path }}"
+      register: template_image
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Convert CHR raw image to qcow2
+      ansible.builtin.command: >
+        qemu-img convert -f raw -O qcow2
+        {{ template_image_path }}
+        {{ disk_path }}
+      when: not destination_disk.stat.exists
+      register: convert_output
+      changed_when: convert_output.rc == 0
+
+    - name: Define CHR VM in libvirt
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>MikroTik CHR VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <devices>
+              <emulator>/usr/libexec/qemu-kvm</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <!-- ether1: WAN interface -->
+              <interface type='bridge'>
+                <source bridge='{{ wan_bridge }}'/>
+                <model type='virtio'/>
+              </interface>
+              <!-- ether2: LAN / internal interface -->
+              <interface type='bridge'>
+                <source bridge='{{ lan_bridge }}'/>
+                <model type='virtio'/>
+              </interface>
+              <!-- QEMU Guest Agent Channel -->
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+
+    - name: Configure CHR VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart | bool }}"
+
+    - name: Start CHR VM
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Pause for 10 seconds
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      timeout: 30
+
+    - name: Discover CHR bootstrap IP from libvirt ARP table
+      ansible.builtin.shell: >-
+        virsh domifaddr {{ vm_name }} --source agent | grep ether1 |  awk '{print $4}' | cut -d/ -f1
+        # virsh domifaddr {{ vm_name }} --source arp |  awk 'NR==3 {print $4}'  | cut -d/ -f1
+      register: chr_bootstrap_ip
+      until: chr_bootstrap_ip.stdout | trim | length > 0
+      retries: 10
+      delay: 3
+      changed_when: false
+      become: true
+      args:
+        executable: /bin/bash
+
+    - name: Wait for CHR to boot and accept SSH connections
+      ansible.builtin.wait_for:
+        host: "{{ chr_bootstrap_ip.stdout | trim }}"
+        port: 22
+        delay: 20
+        timeout: 30
+        state: started
+
+    - name: Require a password for CHR first-login bootstrap
+      ansible.builtin.assert:
+        that:
+          - admin_password | length > 0
+        fail_msg: Set admin_password to the password that should be assigned to the CHR admin user.
+
+    - name: Set CHR admin password during first SSH login
+      ansible.builtin.expect:
+        command: >-
+          ssh -tt -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o PreferredAuthentications=password
+          -o PubkeyAuthentication=no
+          -o PasswordAuthentication=yes
+          -o NumberOfPasswordPrompts=1
+          admin@{{ chr_bootstrap_ip.stdout | trim }}
+        responses:
+          "(?i)admin@.*'s password:": "\n"
+          '(?i)do you want to see the software license\? \[Y/n\]:': "n\n"
+          '(?i)(?:^|[\r\n])[ \t]*new password[ \t]*[>:][ \t]*$': "{{ admin_password }}\n"
+          '(?i)(?:^|[\r\n])[ \t]*(repeat|retype|confirm).*password[ \t]*[>:][ \t]*$': "{{ admin_password }}\n"
+          '(?i)(?:^|[\r\n])[ \t]*\[admin@[^\]]+\][ \t]*>[ \t]*$': "/quit\n"
+        timeout: 20
+        echo: false
+      no_log: true
+      register: chr_password_bootstrap
+      changed_when: true
+
+    - name: Add CHR to dynamic inventory
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: chr_vms
+        ansible_host: "{{ chr_bootstrap_ip.stdout | trim }}"
+        ansible_user: "admin"
+        ansible_password: "{{ admin_password }}"
+        ansible_connection: network_cli
+        ansible_network_os: community.routeros.routeros
+        ansible_command_timeout: 60
+        ansible_host_key_checking: false
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        chr_ip: "{{ chr_ip }}"
+        chr_prefix: "{{ chr_prefix }}"
+        chr_gateway: "{{ chr_gateway }}"
+        chr_dns: "{{ chr_dns }}"
+        lan_ip: "{{ lan_ip }}"
+        lan_prefix: "{{ lan_prefix }}"
+        vm_name: "{{ vm_name }}"
+        admin_password: "{{ admin_password }}"
+
+- name: Configure MikroTik CHR via SSH
+  hosts: chr_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Set router identity (hostname)
+      community.routeros.command:
+        commands:
+          - "/system identity set name={{ vm_name }}"
+
+    - name: Configure static IP address on ether1 (WAN)
+      community.routeros.command:
+        commands:
+          - "/ip address add address={{ chr_ip }}/{{ chr_prefix }} interface=ether1"
+
+    - name: Remove any existing IP address on ether2
+      community.routeros.command:
+        commands:
+          - "/ip address remove [find interface=ether2]"
+      failed_when: false
+
+    - name: Configure static IP address on ether2 (LAN)
+      community.routeros.command:
+        commands:
+          - "/ip address add address={{ lan_ip }}/{{ lan_prefix }} interface=ether2"
+
+    - name: Remove existing default routes
+      community.routeros.command:
+        commands:
+          - "/ip route remove [find dst-address=0.0.0.0/0]"
+      failed_when: false
+
+    - name: Configure default gateway
+      community.routeros.command:
+        commands:
+          - "/ip route add dst-address=0.0.0.0/0 gateway={{ chr_gateway }}"
+
+    - name: Configure DNS servers
+      community.routeros.command:
+        commands:
+          - "/ip dns set servers={{ chr_dns }}"
+
+    # - name: Set new admin password if defined
+    #   community.routeros.command:
+    #     commands:
+    #       - '/user set admin password="{{ admin_password }}"'
+    #   no_log: true
+    #   when:
+    #     - admin_password is defined
+    #     - admin_password | length > 0
+
+    # The rest will to be handle as dhcp IP is removed
+    - name: Remove the WAN DHCP client after static networking is configured
+      community.routeros.command:
+        commands:
+          - "/ip dhcp-client remove 0"
+      changed_when: false
+      failed_when: false
+      timeout: 5
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Display CHR provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " MikroTik CHR Provisioning Summary"
+          - " VM Name    : {{ vm_name }}"
+          - " ether1 WAN : {{ chr_ip }}/{{ chr_prefix }} (gw {{ chr_gateway }})"
+          - " ether2 LAN : {{ lan_ip }}/{{ lan_prefix }}"
+          - " DNS        : {{ chr_dns }}"
+          - " SSH Access : ssh admin@{{ chr_ip }}"
+          - "=========================================="
+
+# Prerequisites:
+#   ansible-galaxy collection install community.libvirt community.routeros

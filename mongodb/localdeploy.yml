@@ -1,0 +1,602 @@
+---
+- name: Deploy KVM VM using local Debian image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "mskladb13mong01"
+    vm_memory_kb: 4194304 # 4096 MB
+    vm_vcpus: 4
+    disk_size: "32G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
+    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware is installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /nvme/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Ensure guest agent is enabled in XML
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>{{ uefi_vars_path }}</nvram>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>/usr/libexec/qemu-kvm</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+            </devices>
+          </domain>
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    # - name: Set VM to autostart
+    #   community.libvirt.virt:
+    #     name: "{{ vm_name }}"
+    #     autostart: yes
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: false
+      become: false
+
+    - name: Add new VM to dynamic inventory (via Out-of-band Channel)
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: spawned_vms
+        vm_name: "{{ vm_name }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ vm_name }}"
+        ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install }}"
+
+    #    - name: Pause for 30 seconds
+    #      ansible.builtin.pause:
+    #        seconds: 30
+
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+- name: Provision the spawned VM
+  hosts: spawned_vms
+  gather_facts: true
+  vars:
+    # vm_name: "mskladb13test02"
+    # admin_user: "madmin"
+    # ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
+      become: yes
+      run_once: true
+
+    # - name: Configure GRUB kernel cmdline for serial console
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/default/grub
+    #     regexp: '^GRUB_CMDLINE_LINUX='
+    #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+    #     backrefs: no
+    #   register: grub_serial_console
+    #   become: yes
+
+    # - name: Rebuild grub config on Debian family
+    #   ansible.builtin.command: update-grub
+    #   when:
+    #     - ansible_os_family == 'Debian'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    # - name: Rebuild grub config on RedHat family
+    #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    - name: Enable serial getty on ttyS0
+      ansible.builtin.systemd:
+        name: serial-getty@ttyS0.service
+        enabled: true
+        state: started
+      become: yes
+      run_once: true
+
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+      become: yes
+      run_once: true
+
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
+      become: yes
+      run_once: true
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+      become: yes
+      run_once: true
+
+    - name: Remove default cloud users if they exist
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes
+      become: yes
+      loop:
+        - ubuntu
+        - debian
+      when: item != admin_user
+      run_once: true
+
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+      become: yes
+      run_once: true
+
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  vars:
+    static_ip: "192.168.51.121/23"
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.250"
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
+      become: yes
+
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: yes
+
+    # -------------------------------------------------------------------------
+    # Disable ifup / ifupdown on Debian
+    # -------------------------------------------------------------------------
+    - name: Stop, disable, and mask ifupdown networking service (Debian)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop:
+        - networking
+        - ifup@eth*
+      when: ansible_os_family == 'Debian'
+      failed_when: false
+      become: yes
+
+    - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
+      ansible.builtin.copy:
+        dest: /etc/network/interfaces
+        content: |
+          # Managed by Ansible - physical interfaces handled by systemd-networkd
+          auto lo
+          iface lo inet loopback
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_os_family == 'Debian'
+      become: yes
+
+    - name: Remove any interface snippets in /etc/network/interfaces.d
+      ansible.builtin.file:
+        path: /etc/network/interfaces.d
+        state: absent
+      when: ansible_os_family == 'Debian'
+      become: yes
+      run_once: true
+
+    - name: Ensure clean /etc/network/interfaces.d directory exists
+      ansible.builtin.file:
+        path: /etc/network/interfaces.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: ansible_os_family == 'Debian'
+      become: yes
+      run_once: true
+
+    - name: Disable cloud-init network configuration
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        content: |
+          network: {config: disabled}
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_os_family == 'Debian'
+      failed_when: false
+      become: yes
+
+    # - name: Remove conflicting netplan default configurations if present
+    #   ansible.builtin.file:
+    #     path: "{{ item }}"
+    #     state: absent
+    #   loop:
+    #     - /etc/netplan/50-cloud-init.yaml
+    #     - /etc/netplan/00-installer-config.yaml
+    #   failed_when: false
+    #   become: yes
+
+    - name: Configure static IP in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-static-en.network
+        content: |
+          [Match]
+          Name=e*
+
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+
+          IPv6AcceptRA=no
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart systemd-networkd
+      become: yes
+
+    - name: Ensure systemd-networkd is unmasked, enabled and started
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: yes
+        masked: no
+        state: started
+      become: yes
+
+    # - name: Ensure systemd-resolved is installed (Debian/Ubuntu)
+    #   ansible.builtin.package:
+    #     name: systemd-resolved
+    #     state: present
+    #   when: ansible_os_family == 'Debian'
+    #   failed_when: false
+    #   become: yes
+    #   run_once: true
+
+    # - name: Ensure systemd-resolved is enabled and started
+    #   ansible.builtin.systemd:
+    #     name: systemd-resolved
+    #     enabled: yes
+    #     state: started
+    #   failed_when: false
+    #   ignore_errors: true
+    #   become: yes
+
+    # - name: Ensure /etc/resolv.conf is symlinked to systemd-resolved stub
+    #   ansible.builtin.file:
+    #     src: /run/systemd/resolve/stub-resolv.conf
+    #     dest: /etc/resolv.conf
+    #     state: link
+    #     force: yes
+    #   when: ansible_os_family == 'Debian'
+    #   failed_when: false
+    #   become: yes
+    #   run_once: true
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ ansible_facts['hostname'] }}"
+          - " Configured IP: {{ static_ip }}"
+          - " IPv4 Address: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+          - "=========================================="
+
+  handlers:
+    - name: Restart systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+      become: yes
+
+- name: Update and install baseline tools on the spawned VM
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.package:
+        name: "*"
+        state: latest
+      # become: yes (Not needed: Agent connection is already root-privileged)
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.package:
+        name:
+          - mc
+          - htop
+          - curl
+          - wget
+          - sudo
+        state: present
+      become: yes
+
+    - name: Reboot VM to apply network changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+      become: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 30
+
+    # - name: Reboot VM to apply network changes
+    #   ansible.builtin.reboot:
+    #     reboot_timeout: 60
+    #     connect_timeout: 90
+    #     pre_reboot_delay: 3
+    #     post_reboot_delay: 20
+    #     test_command: uptime
+    #   become: true
+
+- name: Install and configure MongoDB
+  hosts: spawned_vms
+  become: true
+
+  vars:
+    mongodb_version: "8.0"
+    distrib_codename: "noble"
+    mongodb_gpg_key_url: "https://pgp.mongodb.com/server-{{ mongodb_version }}.asc"
+    mongodb_gpg_key_path: "/usr/share/keyrings/mongodb-server-{{ mongodb_version }}.gpg"
+    mongodb_repo_file: "/etc/apt/sources.list.d/mongodb-org-{{ mongodb_version }}.list"
+
+    mongodb_prereq_packages:
+      - curl
+      - ca-certificates
+      - gnupg
+
+    mongodb_packages:
+      - mongodb-org
+      - mongodb-org-tools
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Prerequisites & Repository Configuration
+    # -------------------------------------------------------------------------
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name: "{{ mongodb_prereq_packages }}"
+        state: present
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Ensure keyrings directory exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download and dearmor MongoDB GPG key
+      ansible.builtin.shell:
+        cmd: "curl -fsSL {{ mongodb_gpg_key_url }} | gpg --dearmor --batch --yes -o {{ mongodb_gpg_key_path }} && chmod 644 {{ mongodb_gpg_key_path }}"
+      args:
+        creates: "{{ mongodb_gpg_key_path }}"
+
+    - name: Add MongoDB APT repository
+      ansible.builtin.copy:
+        dest: "{{ mongodb_repo_file }}"
+        content: "deb [ arch=amd64 signed-by={{ mongodb_gpg_key_path }} ] https://repo.mongodb.org/apt/ubuntu {{ distrib_codename }}/mongodb-org/{{ mongodb_version }} multiverse\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # -------------------------------------------------------------------------
+    # 2. Package Installation
+    # -------------------------------------------------------------------------
+    - name: Update apt cache and install MongoDB packages
+      ansible.builtin.apt:
+        name: "{{ mongodb_packages }}"
+        state: present
+        update_cache: yes
+
+    # -------------------------------------------------------------------------
+    # 3. Service Management
+    # -------------------------------------------------------------------------
+    - name: Ensure MongoDB service is enabled and started
+      ansible.builtin.systemd:
+        name: mongod
+        enabled: yes
+        state: started
+
+
+
+# ansible-galaxy collection install community.libvirt ansible.posix

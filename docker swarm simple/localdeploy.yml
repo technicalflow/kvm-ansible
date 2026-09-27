@@ -1,0 +1,679 @@
+---
+- name: Deploy KVM VMs using local Debian image
+  hosts: localhost
+  become: true
+  vars:
+    # List of 3 virtual machines to provision
+    vms:
+      - vm_name: "mskladb13node01"
+        static_ip: "192.168.51.151/23"
+      - vm_name: "mskladb13node02"
+        static_ip: "192.168.51.152/23"
+      - vm_name: "mskladb13node03"
+        static_ip: "192.168.51.153/23"
+
+    vm_memory_kb: 4194304 # 4096 MB
+    vm_vcpus: 4
+    disk_size: "32G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    vm_autostart: false
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware is installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /nvme/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domains exist in libvirt
+      ansible.builtin.command: "virsh dominfo {{ item.vm_name }}"
+      register: virsh_dominfo
+      loop: "{{ vms }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Record fresh install status per VM
+      ansible.builtin.set_fact:
+        is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
+      loop: "{{ virsh_dominfo.results }}"
+
+    - name: End play early if all VMs are already provisioned
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All VMs ({{ is_fresh_install_map.keys() | list | join(', ') }}) are already defined in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
+
+    - name: Check if destination images already exist
+      ansible.builtin.stat:
+        path: "/nvme/vms/{{ item.vm_name }}.qcow2"
+      loop: "{{ vms }}"
+      register: destination_disks
+
+    - name: Create standalone VM disks from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "/nvme/vms/{{ item.item.vm_name }}.qcow2"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ destination_disks.results }}"
+      when: not item.stat.exists
+
+    - name: Resize the images to desired disk size
+      ansible.builtin.command: "qemu-img resize /nvme/vms/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
+      register: resize_output
+      changed_when: not item.stat.exists
+      loop: "{{ destination_disks.results }}"
+      when: not item.stat.exists
+
+    - name: Ensure guest agent is enabled in XML
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ item.vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>/var/lib/libvirt/qemu/nvram/{{ item.vm_name }}_VARS.fd</nvram>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='/nvme/vms/{{ item.vm_name }}.qcow2'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+      loop: "{{ vms }}"
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        autostart: "{{ vm_autostart }}"
+      loop: "{{ vms }}"
+
+    - name: Ensure VMs are started
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        state: running
+      loop: "{{ vms }}"
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 25
+      delay: 3
+      changed_when: false
+      become: false
+      loop: "{{ vms }}"
+
+    - name: Add new VMs to dynamic inventory
+      ansible.builtin.add_host:
+        name: "{{ item.vm_name }}"
+        groups:
+          - spawned_vms
+          - "{{ 'swarm_managers' if loop_idx == 0 else 'swarm_workers' }}"
+        vm_name: "{{ item.vm_name }}"
+        static_ip: "{{ item.static_ip }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ item.vm_name }}"
+        ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install_map[item.vm_name] }}"
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: item
+        index_var: loop_idx
+
+- name: Provision, configure, and install Docker on spawned VMs sequentially
+  hosts: spawned_vms
+  serial: 1
+  gather_facts: true
+  vars:
+    # static_ip: "{{ item.static_ip }}"
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.250"
+  tasks:
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 60
+
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    - name: Configure OS, hostname, user, and network (Day 1 initial setup)
+      when: is_fresh_install
+      block:
+        - name: Expand root partition and filesystem
+          ansible.builtin.shell: |
+            ROOT_PART=$(findmnt -n -o SOURCE /)
+            ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+            ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+            growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+            FS_TYPE=$(findmnt -n -o FSTYPE /)
+            if [ "$FS_TYPE" = "xfs" ]; then
+              xfs_growfs /
+            else
+              resize2fs "$ROOT_PART"
+            fi
+          args:
+            executable: /bin/bash
+          register: growpart_result
+          changed_when: "'CHANGED' in growpart_result.stdout"
+          failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+          become: true
+
+        - name: Set hostname to '{{ vm_name }}'
+          ansible.builtin.hostname:
+            name: "{{ vm_name }}"
+          become: yes
+
+        - name: Add all cluster VM hostnames and IPs to /etc/hosts
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
+            line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
+            state: present
+          loop: "{{ groups['spawned_vms'] }}"
+          become: yes
+
+        # - name: Configure GRUB kernel cmdline for serial console
+        #   ansible.builtin.lineinfile:
+        #     path: /etc/default/grub
+        #     regexp: '^GRUB_CMDLINE_LINUX='
+        #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+        #     backrefs: no
+        #   register: grub_serial_console
+        #   become: yes
+
+        # - name: Rebuild grub config on Debian family
+        #   ansible.builtin.command: update-grub
+        #   when:
+        #     - ansible_os_family == 'Debian'
+        #     - grub_serial_console.changed
+        #   become: yes
+
+        # - name: Rebuild grub config on RedHat family
+        #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+        #   when:
+        #     - ansible_os_family == 'RedHat'
+        #     - grub_serial_console.changed
+        #   become: yes
+
+        - name: Enable serial getty on ttyS0
+          ansible.builtin.systemd:
+            name: serial-getty@ttyS0.service
+            enabled: true
+            state: started
+          become: yes
+
+        - name: Ensure the user admin exists
+          ansible.builtin.user:
+            name: "{{ admin_user }}"
+            group: users
+            groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+            append: yes
+            state: present
+            create_home: yes
+            shell: /bin/bash
+            update_password: on_create
+            password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+          become: yes
+
+        - name: Create ssh directory
+          ansible.builtin.file:
+            path: /home/{{ admin_user }}/.ssh
+            state: directory
+            owner: "{{ admin_user }}"
+            group: users
+            mode: "0700"
+          become: yes
+
+        - name: Add SSH public key for admin user
+          ansible.posix.authorized_key:
+            user: "{{ admin_user }}"
+            state: present
+            key: "{{ lookup('file', ssh_pub_key_file) }}"
+          become: yes
+
+        - name: Remove default cloud users if they exist
+          ansible.builtin.user:
+            name: "{{ item }}"
+            state: absent
+            remove: yes
+          become: yes
+          loop:
+            - ubuntu
+            - debian
+          when: item != admin_user
+
+        - name: Configure passwordless sudo for admin user
+          ansible.builtin.copy:
+            dest: "/etc/sudoers.d/{{ admin_user }}"
+            content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+            mode: "0440"
+            validate: /usr/sbin/visudo -cf %s
+          become: yes
+
+        - name: Purge existing systemd-networkd configuration directory
+          ansible.builtin.file:
+            path: /etc/systemd/network
+            state: absent
+          become: yes
+
+        - name: Ensure clean systemd-networkd directory exists
+          ansible.builtin.file:
+            path: /etc/systemd/network
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          become: yes
+
+        # -------------------------------------------------------------------------
+        # Disable ifup / ifupdown on Debian
+        # -------------------------------------------------------------------------
+        - name: Stop, disable, and mask ifupdown networking service (Debian)
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            state: stopped
+            enabled: false
+            masked: true
+          loop:
+            - networking
+            - ifup@eth*
+          when: ansible_os_family == 'Debian'
+          failed_when: false
+          become: yes
+
+        - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
+          ansible.builtin.copy:
+            dest: /etc/network/interfaces
+            content: |
+              # Managed by Ansible - physical interfaces handled by systemd-networkd
+              auto lo
+              iface lo inet loopback
+            owner: root
+            group: root
+            mode: "0644"
+          when: ansible_os_family == 'Debian'
+          become: yes
+
+        - name: Remove any interface snippets in /etc/network/interfaces.d
+          ansible.builtin.file:
+            path: /etc/network/interfaces.d
+            state: absent
+          when: ansible_os_family == 'Debian'
+          become: yes
+
+        - name: Ensure clean /etc/network/interfaces.d directory exists
+          ansible.builtin.file:
+            path: /etc/network/interfaces.d
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          when: ansible_os_family == 'Debian'
+          become: yes
+
+        - name: Disable cloud-init network configuration
+          ansible.builtin.copy:
+            dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+            content: |
+              network: {config: disabled}
+            owner: root
+            group: root
+            mode: "0644"
+          when: ansible_os_family == 'Debian'
+          failed_when: false
+          become: yes
+
+        # - name: Remove conflicting netplan default configurations if present
+        #   ansible.builtin.file:
+        #     path: "{{ item }}"
+        #     state: absent
+        #   loop:
+        #     - /etc/netplan/50-cloud-init.yaml
+        #     - /etc/netplan/00-installer-config.yaml
+        #   failed_when: false
+        #   become: yes
+
+        - name: Configure static IP in systemd-networkd
+          ansible.builtin.copy:
+            dest: /etc/systemd/network/10-static-en.network
+            content: |
+              [Match]
+              Name=e*
+
+              [Network]
+              Address={{ static_ip }}
+              {% for dns in dns_servers %}
+              DNS={{ dns }}
+              {% endfor %}
+
+              IPv6AcceptRA=no
+              [Route]
+              Destination=0.0.0.0/0
+              Gateway={{ gateway_ip }}
+              GatewayOnLink=yes
+              Metric=10
+            owner: root
+            group: root
+            mode: "0644"
+          become: yes
+
+        - name: Ensure systemd-networkd is unmasked, enabled and started
+          ansible.builtin.systemd:
+            name: systemd-networkd
+            enabled: yes
+            masked: no
+            state: started
+          become: yes
+
+        # - name: Ensure systemd-resolved is installed (Debian/Ubuntu)
+        #   ansible.builtin.package:
+        #     name: systemd-resolved
+        #     state: present
+        #   when: ansible_os_family == 'Debian'
+        #   failed_when: false
+        #   become: yes
+        #   run_once: true
+
+        # - name: Ensure systemd-resolved is enabled and started
+        #   ansible.builtin.systemd:
+        #     name: systemd-resolved
+        #     enabled: yes
+        #     state: started
+        #   failed_when: false
+        #   ignore_errors: true
+        #   become: yes
+
+        # - name: Ensure /etc/resolv.conf is symlinked to systemd-resolved stub
+        #   ansible.builtin.file:
+        #     src: /run/systemd/resolve/stub-resolv.conf
+        #     dest: /etc/resolv.conf
+        #     state: link
+        #     force: yes
+        #   when: ansible_os_family == 'Debian'
+        #   failed_when: false
+        #   become: yes
+        #   run_once: true
+
+        - name: Display VM Hostname and IP address summary
+          ansible.builtin.debug:
+            msg:
+              - "=========================================="
+              - " VM Provisioning Summary"
+              - " Hostname: {{ vm_name }}"
+              - " Configured IP: {{ static_ip }}"
+              - "=========================================="
+
+- name: Update and install baseline tools on the spawned VMs
+  hosts: spawned_vms
+  serial: 1
+  gather_facts: false
+  tasks:
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.package:
+        name: "*"
+        state: latest
+      # become: yes (Not needed: Agent connection is already root-privileged)
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.package:
+        name:
+          - mc
+          - htop
+          - curl
+          - wget
+          - sudo
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+      become: yes
+
+    # -------------------------------------------------------------------------
+    # Docker Service Installation
+    # -------------------------------------------------------------------------
+    # - name: Ensure prerequisite packages are installed
+    #   ansible.builtin.apt:
+    #     name:
+    #       - ca-certificates
+    #       - curl
+    #       - gnupg
+    #     state: present
+    #     update_cache: yes
+
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Docker official GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+
+    - name: Configure Docker official APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+        filename: docker
+        state: present
+
+    - name: Install Docker Engine and plugins
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+          - python3-docker
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Add admin user to docker group
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: docker
+        append: yes
+      when: admin_user is defined
+
+    - name: Reboot VM to apply changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+      become: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+- name: Initialize Docker Swarm on Manager
+  hosts: swarm_managers
+  gather_facts: false
+  tasks:
+    - name: Extract node IP address
+      ansible.builtin.set_fact:
+        node_ip: "{{ static_ip.split('/')[0] }}"
+
+    - name: Initialize Swarm cluster on manager
+      community.docker.docker_swarm:
+        state: present
+        advertise_addr: "{{ node_ip }}"
+      register: swarm_info
+
+    - name: Save Docker Swarm tokens to secrets file
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/docker_swarm_tokens.yml"
+        content: |
+          # Docker Swarm Cluster Tokens
+          docker_swarm_manager_ip: "{{ node_ip }}"
+          docker_swarm_worker_token: "{{ swarm_info.swarm_facts.JoinTokens.Worker }}"
+          docker_swarm_manager_token: "{{ swarm_info.swarm_facts.JoinTokens.Manager }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+- name: Join Worker nodes to Docker Swarm
+  hosts: swarm_workers
+  serial: 1
+  gather_facts: false
+  tasks:
+    - name: Extract worker IP address
+      ansible.builtin.set_fact:
+        node_ip: "{{ static_ip.split('/')[0] }}"
+
+    - name: Join Swarm cluster as worker
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: "{{ node_ip }}"
+        join_token: "{{ hostvars[groups['swarm_managers'][0]]['swarm_info']['swarm_facts']['JoinTokens']['Worker'] }}"
+        remote_addrs:
+          - "{{ hostvars[groups['swarm_managers'][0]]['node_ip'] }}:2377"
+
+- name: Verify Docker Swarm cluster status
+  hosts: swarm_managers
+  gather_facts: false
+  tasks:
+    - name: Retrieve cluster node list
+      ansible.builtin.command: docker node ls
+      register: docker_node_ls
+      changed_when: false
+
+    - name: Display Swarm cluster nodes
+      ansible.builtin.debug:
+        var: docker_node_ls.stdout_lines
+# Required collections on Ansible control node:
+# ansible-galaxy collection install community.libvirt ansible.posix community.docker
