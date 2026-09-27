@@ -10,7 +10,7 @@
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
-    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
     uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
@@ -46,7 +46,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /nvme/vms
+        path: /data/VMS
         state: directory
         owner: root
         group: root

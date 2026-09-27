@@ -9,11 +9,11 @@
     vm_autostart: false
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/chr-7.24.4.img"
-    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
 
     # Network — WAN (ether1)
     wan_bridge: "br0"
-    chr_ip: "192.168.51.200" # WAN IP — used to reach CHR for provisioning
+    chr_ip: "192.168.50.252" # WAN IP — used to reach CHR for provisioning
     chr_prefix: "23"
     chr_gateway: "192.168.50.250"
     chr_dns: "192.168.50.250"
@@ -24,6 +24,7 @@
 
     # Credentials (default CHR admin has no password on first boot)
     admin_password: "admin" # Set to non-empty string to configure a secure password
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
 
   tasks:
     - name: Ensure required packages are installed (RedHat/CentOS/Fedora/Rocky)
@@ -46,7 +47,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /nvme/vms
+        path: /data/VMS
         state: directory
         owner: root
         group: root
@@ -116,7 +117,7 @@
               <timer name='hpet' present='no'/>
             </clock>
             <devices>
-              <emulator>/usr/libexec/qemu-kvm</emulator>
+              <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
                 <source file='{{ disk_path }}'/>

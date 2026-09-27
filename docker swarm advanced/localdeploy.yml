@@ -86,7 +86,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /nvme/vms
+        path: /data/VMS
         state: directory
         owner: root
         group: root
@@ -115,14 +115,14 @@
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
-        path: "/nvme/vms/{{ item.vm_name }}.qcow2"
+        path: "/data/VMS/{{ item.vm_name }}.qcow2"
       loop: "{{ vms }}"
       register: destination_disks
 
     - name: Create standalone VM disks from local template
       ansible.builtin.copy:
         src: "{{ template_image_path }}"
-        dest: "/nvme/vms/{{ item.item.vm_name }}.qcow2"
+        dest: "/data/VMS/{{ item.item.vm_name }}.qcow2"
         remote_src: true
         force: false
         owner: root
@@ -132,7 +132,7 @@
       when: not item.stat.exists
 
     - name: Resize the images to desired disk size
-      ansible.builtin.command: "qemu-img resize /nvme/vms/{{ item.item.vm_name }}.qcow2 {{ item.item.disk_size }}"
+      ansible.builtin.command: "qemu-img resize /data/VMS/{{ item.item.vm_name }}.qcow2 {{ item.item.disk_size }}"
       register: resize_output
       changed_when: not item.stat.exists
       loop: "{{ destination_disks.results }}"
@@ -181,7 +181,7 @@
               <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
-                <source file='/nvme/vms/{{ item.vm_name }}.qcow2'/>
+                <source file='/data/VMS/{{ item.vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
               <interface type='bridge'>
