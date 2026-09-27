@@ -10,6 +10,7 @@
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/chr-7.24.4.img"
     disk_path: "/data/VMS/{{ vm_name }}.qcow2"
+    disk2_path: "/data/VMS/{{ vm_name }}_disk2.qcow2"  # Second disk for CHR
 
     # Network — WAN (ether1)
     wan_bridge: "br0"
@@ -19,7 +20,7 @@
     chr_dns: "192.168.50.250"
     # Network — LAN (ether2)
     lan_bridge: "virbr0"
-    lan_ip: "10.0.0.1"
+    lan_ip: "192.168.120.252"
     lan_prefix: "24"
 
     # Credentials (default CHR admin has no password on first boot)
@@ -77,6 +78,20 @@
         path: "{{ disk_path }}"
       register: destination_disk
 
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk2_path }}"
+      register: destination_disk2
+      failed_when: false
+      changed_when: false
+
+    - name: Create 10 GiB secondary CHR disk
+      ansible.builtin.command: >-
+        qemu-img create -f qcow2 {{ disk2_path }} 10G
+      when: not destination_disk2.stat.exists
+      register: create_disk2_output
+      changed_when: create_disk2_output.rc == 0
+
     - name: Convert CHR raw image to qcow2
       ansible.builtin.command: >
         qemu-img convert -f raw -O qcow2
@@ -123,6 +138,11 @@
                 <source file='{{ disk_path }}'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' discard='unmap'/>
+                <source file='{{ disk2_path }}'/>
+                <target dev='vdb' bus='virtio'/>
+              </disk>
               <!-- ether1: WAN interface -->
               <interface type='bridge'>
                 <source bridge='{{ wan_bridge }}'/>
@@ -163,14 +183,16 @@
         name: "{{ vm_name }}"
         state: running
 
-    - name: Pause for 10 seconds
+    - name: Pause for 15 seconds
       ansible.builtin.pause:
-        seconds: 10
+        seconds: 15
 
     - name: Ensure guest agent is responding
-      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      ansible.builtin.command: "virsh -c qemu:///system qemu-agent-command {{ vm_name }} '{\"execute\":\"guest-ping\"}'"
       register: agent_ready
       until: agent_ready.rc == 0
+      retries: 3
+      delay: 5
       timeout: 30
 
     - name: Discover CHR bootstrap IP from libvirt ARP table
@@ -247,10 +269,6 @@
   hosts: chr_vms
   gather_facts: false
   tasks:
-    - name: End play if VM was already provisioned
-      ansible.builtin.meta: end_host
-      when: not is_fresh_install
-
     - name: Set router identity (hostname)
       community.routeros.command:
         commands:
@@ -319,6 +337,9 @@
           - " DNS        : {{ chr_dns }}"
           - " SSH Access : ssh admin@{{ chr_ip }}"
           - "=========================================="
+
+    - name: Close RouterOS persistent connection
+      ansible.builtin.meta: reset_connection
 
 # Prerequisites:
 #   ansible-galaxy collection install community.libvirt community.routeros

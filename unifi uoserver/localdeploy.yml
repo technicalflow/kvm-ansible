@@ -10,8 +10,7 @@
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
-    wan_bridge: "br0"
-    lan_bridge: "virbr0"
+    local_bridge: "br0"
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     disk_path: "/data/VMS/{{ vm_name }}.qcow2"
@@ -139,16 +138,10 @@
                 <source file='{{ disk_path }}'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
-              <!-- ether1: WAN interface -->
+              <!-- ether1: Local interface -->
               <interface type='bridge'>
-                <source bridge='{{ wan_bridge }}'/>
+                <source bridge='{{ local_bridge }}'/>
                 <model type='virtio'/>
-              </interface>
-              <!-- ether2: LAN / internal interface -->
-              <interface type='bridge'>
-                <source bridge='{{ lan_bridge }}'/>
-                <model type='virtio'/>
-                <link state='up'/>
               </interface>
               <controller type='virtio-serial' index='0'/>
               <channel type='unix'>
