@@ -12,7 +12,7 @@
       - vm_name: "mskladb13node03"
         static_ip: "192.168.51.153/23"
 
-    vm_memory_kb: 4194304 # 4096 MB
+    vm_memory_kb: 2097152 # 2048 MB each
     vm_vcpus: 4
     disk_size: "32G"
     admin_user: "madmin"
