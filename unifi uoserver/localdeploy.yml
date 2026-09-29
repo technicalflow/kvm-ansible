@@ -325,7 +325,7 @@
   hosts: spawned_vms
   gather_facts: false
   vars:
-    static_ip: "192.168.50.246/23"
+    static_ip: "192.168.50.248/23"
     gateway_ip: "192.168.50.250"
     dns_servers:
       - "192.168.50.250"

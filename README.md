@@ -1,6 +1,6 @@
 ### Repository for provisioning of local KVM machines using packer image and ansible
-
-VMs are configred using qemu agent
+#### Packer files are located here: https://github.com/technicalflow/kvmvagrant/tree/master/packer
+VMs are configured with ansible using qemu agent
 
 Can be also used with cloud image by adding image_url to variables:<br>
 image_url: "https://cloud.debian.org/images/cloud/trixie/20260722-2547/debian-13-nocloud-amd64-20260722-2547.qcow2"
