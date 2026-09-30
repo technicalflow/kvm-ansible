@@ -11,6 +11,11 @@
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
     local_bridge: "br0"
+    static_ip: "192.168.50.248/23"
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     disk_path: "/data/VMS/{{ vm_name }}.qcow2"
@@ -142,6 +147,7 @@
               <interface type='bridge'>
                 <source bridge='{{ local_bridge }}'/>
                 <model type='virtio'/>
+                <link state='up'/>
               </interface>
               <controller type='virtio-serial' index='0'/>
               <channel type='unix'>
@@ -199,6 +205,9 @@
         admin_user: "{{ admin_user }}"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
         is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
 
     #    - name: Pause for 30 seconds
     #      ansible.builtin.pause:
@@ -213,7 +222,6 @@
 - name: Provision the spawned VM
   hosts: spawned_vms
   gather_facts: true
-  vars:
   tasks:
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
@@ -266,12 +274,12 @@
     #     - grub_serial_console.changed
     #   become: yes
 
-    - name: Enable serial getty on ttyS0
-      ansible.builtin.systemd:
-        name: serial-getty@ttyS0.service
-        enabled: true
-        state: started
-      become: yes
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: yes
 
     - name: Ensure the user admin exists
       ansible.builtin.user:
@@ -302,16 +310,16 @@
         key: "{{ lookup('file', ssh_pub_key_file) }}"
       become: yes
 
-    - name: Remove default cloud users if they exist
-      ansible.builtin.user:
-        name: "{{ item }}"
-        state: absent
-        remove: yes
-      become: yes
-      loop:
-        - ubuntu
-        - debian
-      when: item != admin_user
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   become: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
 
     - name: Configure passwordless sudo for admin user
       ansible.builtin.copy:
@@ -324,11 +332,11 @@
 - name: Configure static IP using systemd-networkd
   hosts: spawned_vms
   gather_facts: false
-  vars:
-    static_ip: "192.168.50.248/23"
-    gateway_ip: "192.168.50.250"
-    dns_servers:
-      - "192.168.50.250"
+  # vars:
+  #   static_ip: "192.168.50.248/23"
+  #   gateway_ip: "192.168.50.250"
+  #   dns_servers:
+  #     - "192.168.50.250"
   tasks:
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
@@ -352,60 +360,60 @@
     # -------------------------------------------------------------------------
     # Disable ifup / ifupdown on Debian
     # -------------------------------------------------------------------------
-    - name: Stop, disable, and mask ifupdown networking service (Debian)
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: false
-        masked: true
-      loop:
-        - networking
-        - ifup@eth*
-      when: ansible_os_family == 'Debian'
-      failed_when: false
-      become: yes
+    # - name: Stop, disable, and mask ifupdown networking service (Debian)
+    #   ansible.builtin.systemd:
+    #     name: "{{ item }}"
+    #     state: stopped
+    #     enabled: false
+    #     masked: true
+    #   loop:
+    #     - networking
+    #     - ifup@eth*
+    #   when: ansible_os_family == 'Debian'
+    #   failed_when: false
+    #   become: yes
 
-    - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
-      ansible.builtin.copy:
-        dest: /etc/network/interfaces
-        content: |
-          # Managed by Ansible - physical interfaces handled by systemd-networkd
-          auto lo
-          iface lo inet loopback
-        owner: root
-        group: root
-        mode: "0644"
-      when: ansible_os_family == 'Debian'
-      become: yes
+    # - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
+    #   ansible.builtin.copy:
+    #     dest: /etc/network/interfaces
+    #     content: |
+    #       # Managed by Ansible - physical interfaces handled by systemd-networkd
+    #       auto lo
+    #       iface lo inet loopback
+    #     owner: root
+    #     group: root
+    #     mode: "0644"
+    #   when: ansible_os_family == 'Debian'
+    #   become: yes
 
-    - name: Remove any interface snippets in /etc/network/interfaces.d
-      ansible.builtin.file:
-        path: /etc/network/interfaces.d
-        state: absent
-      when: ansible_os_family == 'Debian'
-      become: yes
+    # - name: Remove any interface snippets in /etc/network/interfaces.d
+    #   ansible.builtin.file:
+    #     path: /etc/network/interfaces.d
+    #     state: absent
+    #   when: ansible_os_family == 'Debian'
+    #   become: yes
 
-    - name: Ensure clean /etc/network/interfaces.d directory exists
-      ansible.builtin.file:
-        path: /etc/network/interfaces.d
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      when: ansible_os_family == 'Debian'
-      become: yes
+    # - name: Ensure clean /etc/network/interfaces.d directory exists
+    #   ansible.builtin.file:
+    #     path: /etc/network/interfaces.d
+    #     state: directory
+    #     owner: root
+    #     group: root
+    #     mode: "0755"
+    #   when: ansible_os_family == 'Debian'
+    #   become: yes
 
-    - name: Disable cloud-init network configuration
-      ansible.builtin.copy:
-        dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-        content: |
-          network: {config: disabled}
-        owner: root
-        group: root
-        mode: "0644"
-      when: ansible_os_family == 'Debian'
-      failed_when: false
-      become: yes
+    # - name: Disable cloud-init network configuration
+    #   ansible.builtin.copy:
+    #     dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    #     content: |
+    #       network: {config: disabled}
+    #     owner: root
+    #     group: root
+    #     mode: "0644"
+    #   when: ansible_os_family == 'Debian'
+    #   failed_when: false
+    #   become: yes
 
     # - name: Remove conflicting netplan default configurations if present
     #   ansible.builtin.file:
@@ -441,13 +449,19 @@
         mode: "0644"
       become: yes
 
-    - name: Ensure systemd-networkd is unmasked, enabled and started
+    - name: Restart systemd-networkd to apply static IP configuration
       ansible.builtin.systemd:
         name: systemd-networkd
-        enabled: yes
-        masked: no
-        state: started
-      become: yes
+        state: restarted
+      become: true
+
+    # - name: Ensure systemd-networkd is unmasked, enabled and started
+    #   ansible.builtin.systemd:
+    #     name: systemd-networkd
+    #     enabled: yes
+    #     masked: no
+    #     state: started
+    #   become: yes
 
     # - name: Ensure systemd-resolved is installed (Debian/Ubuntu)
     #   ansible.builtin.package:
@@ -509,9 +523,6 @@
           - htop
           - curl
           - wget
-          - sudo
-          - ca-certificates
-          - curl
           - gnupg
         state: present
       become: yes

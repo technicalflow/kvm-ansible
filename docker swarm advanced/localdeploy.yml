@@ -31,6 +31,10 @@
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
@@ -226,7 +230,7 @@
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
       register: agent_ready
       until: agent_ready.rc == 0
-      retries: 25
+      retries: 10
       delay: 3
       changed_when: false
       become: false
@@ -240,6 +244,8 @@
           - "{{ 'swarm_managers' if loop_idx < num_managers else 'swarm_workers' }}"
         vm_name: "{{ item.vm_name }}"
         static_ip: "{{ item.static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
         ansible_connection: community.libvirt.libvirt_qemu
         ansible_libvirt_uri: "qemu:///system"
         ansible_libvirt_vm: "{{ item.vm_name }}"
@@ -256,11 +262,11 @@
   hosts: spawned_vms
   serial: 1
   gather_facts: true
-  vars:
-    # static_ip: "{{ item.static_ip }}"
-    gateway_ip: "192.168.50.250"
-    dns_servers:
-      - "192.168.50.250"
+  # vars:
+  #   # static_ip: "{{ item.static_ip }}"
+  #   gateway_ip: "192.168.50.250"
+  #   dns_servers:
+  #     - "192.168.50.250"
   tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
@@ -336,12 +342,12 @@
         #     - grub_serial_console.changed
         #   become: yes
 
-        - name: Enable serial getty on ttyS0
-          ansible.builtin.systemd:
-            name: serial-getty@ttyS0.service
-            enabled: true
-            state: started
-          become: yes
+        # - name: Enable serial getty on ttyS0
+        #   ansible.builtin.systemd:
+        #     name: serial-getty@ttyS0.service
+        #     enabled: true
+        #     state: started
+        #   become: yes
 
         - name: Ensure the user admin exists
           ansible.builtin.user:
@@ -372,16 +378,16 @@
             key: "{{ lookup('file', ssh_pub_key_file) }}"
           become: yes
 
-        - name: Remove default cloud users if they exist
-          ansible.builtin.user:
-            name: "{{ item }}"
-            state: absent
-            remove: yes
-          become: yes
-          loop:
-            - ubuntu
-            - debian
-          when: item != admin_user
+        # - name: Remove default cloud users if they exist
+        #   ansible.builtin.user:
+        #     name: "{{ item }}"
+        #     state: absent
+        #     remove: yes
+        #   become: yes
+        #   loop:
+        #     - ubuntu
+        #     - debian
+        #   when: item != admin_user
 
         - name: Configure passwordless sudo for admin user
           ansible.builtin.copy:
@@ -409,60 +415,60 @@
         # -------------------------------------------------------------------------
         # Disable ifup / ifupdown on Debian
         # -------------------------------------------------------------------------
-        - name: Stop, disable, and mask ifupdown networking service (Debian)
-          ansible.builtin.systemd:
-            name: "{{ item }}"
-            state: stopped
-            enabled: false
-            masked: true
-          loop:
-            - networking
-            - ifup@eth*
-          when: ansible_os_family == 'Debian'
-          failed_when: false
-          become: yes
+        # - name: Stop, disable, and mask ifupdown networking service (Debian)
+        #   ansible.builtin.systemd:
+        #     name: "{{ item }}"
+        #     state: stopped
+        #     enabled: false
+        #     masked: true
+        #   loop:
+        #     - networking
+        #     - ifup@eth*
+        #   when: ansible_os_family == 'Debian'
+        #   failed_when: false
+        #   become: yes
 
-        - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
-          ansible.builtin.copy:
-            dest: /etc/network/interfaces
-            content: |
-              # Managed by Ansible - physical interfaces handled by systemd-networkd
-              auto lo
-              iface lo inet loopback
-            owner: root
-            group: root
-            mode: "0644"
-          when: ansible_os_family == 'Debian'
-          become: yes
+        # - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
+        #   ansible.builtin.copy:
+        #     dest: /etc/network/interfaces
+        #     content: |
+        #       # Managed by Ansible - physical interfaces handled by systemd-networkd
+        #       auto lo
+        #       iface lo inet loopback
+        #     owner: root
+        #     group: root
+        #     mode: "0644"
+        #   when: ansible_os_family == 'Debian'
+        #   become: yes
 
-        - name: Remove any interface snippets in /etc/network/interfaces.d
-          ansible.builtin.file:
-            path: /etc/network/interfaces.d
-            state: absent
-          when: ansible_os_family == 'Debian'
-          become: yes
+        # - name: Remove any interface snippets in /etc/network/interfaces.d
+        #   ansible.builtin.file:
+        #     path: /etc/network/interfaces.d
+        #     state: absent
+        #   when: ansible_os_family == 'Debian'
+        #   become: yes
 
-        - name: Ensure clean /etc/network/interfaces.d directory exists
-          ansible.builtin.file:
-            path: /etc/network/interfaces.d
-            state: directory
-            owner: root
-            group: root
-            mode: "0755"
-          when: ansible_os_family == 'Debian'
-          become: yes
+        # - name: Ensure clean /etc/network/interfaces.d directory exists
+        #   ansible.builtin.file:
+        #     path: /etc/network/interfaces.d
+        #     state: directory
+        #     owner: root
+        #     group: root
+        #     mode: "0755"
+        #   when: ansible_os_family == 'Debian'
+        #   become: yes
 
-        - name: Disable cloud-init network configuration
-          ansible.builtin.copy:
-            dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-            content: |
-              network: {config: disabled}
-            owner: root
-            group: root
-            mode: "0644"
-          when: ansible_os_family == 'Debian'
-          failed_when: false
-          become: yes
+        # - name: Disable cloud-init network configuration
+        #   ansible.builtin.copy:
+        #     dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        #     content: |
+        #       network: {config: disabled}
+        #     owner: root
+        #     group: root
+        #     mode: "0644"
+        #   when: ansible_os_family == 'Debian'
+        #   failed_when: false
+        #   become: yes
 
         # - name: Remove conflicting netplan default configurations if present
         #   ansible.builtin.file:
@@ -498,13 +504,19 @@
             mode: "0644"
           become: yes
 
-        - name: Ensure systemd-networkd is unmasked, enabled and started
+        - name: Restart systemd-networkd to apply static IP configuration
           ansible.builtin.systemd:
             name: systemd-networkd
-            enabled: yes
-            masked: no
-            state: started
-          become: yes
+            state: restarted
+          become: true
+
+        # - name: Ensure systemd-networkd is unmasked, enabled and started
+        #   ansible.builtin.systemd:
+        #     name: systemd-networkd
+        #     enabled: yes
+        #     masked: no
+        #     state: started
+        #   become: yes
 
         # - name: Ensure systemd-resolved is installed (Debian/Ubuntu)
         #   ansible.builtin.package:
@@ -571,9 +583,6 @@
           - htop
           - curl
           - wget
-          - sudo
-          - ca-certificates
-          - curl
           - gnupg
         state: present
       become: yes
