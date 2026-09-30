@@ -1,0 +1,573 @@
+---
+- name: Deploy KVM VMs using local Debian image
+  hosts: localhost
+  become: true
+  vars:
+    # List of 3 virtual machines to provision
+    vms:
+      - vm_name: "mskladb13k3ss01"
+        static_ip: "192.168.50.233/23"
+      - vm_name: "mskladb13k3ss02"
+        static_ip: "192.168.50.234/23"
+      - vm_name: "mskladb13k3ss03"
+        static_ip: "192.168.50.235/23"
+
+    vm_memory_kb: 2097152 # 2048 MB each
+    vm_vcpus: 4
+    disk_size: "32G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    vm_autostart: false
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
+
+    k3s_token: "mandarynka"
+    k3s_version: "v1.36.4+k3s1"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware is installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /nvme/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domains exist in libvirt
+      ansible.builtin.command: "virsh dominfo {{ item.vm_name }}"
+      register: virsh_dominfo
+      loop: "{{ vms }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Record fresh install status per VM
+      ansible.builtin.set_fact:
+        is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
+      loop: "{{ virsh_dominfo.results }}"
+
+    - name: End play early if all VMs are already provisioned
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All VMs ({{ is_fresh_install_map.keys() | list | join(', ') }}) are already defined in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
+        # Not ending play because we want to run K3s installation anyway if we rerun
+
+    - name: Check if destination images already exist
+      ansible.builtin.stat:
+        path: "/nvme/vms/{{ item.vm_name }}.qcow2"
+      loop: "{{ vms }}"
+      register: destination_disks
+
+    - name: Create standalone VM disks from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "/nvme/vms/{{ item.item.vm_name }}.qcow2"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ destination_disks.results }}"
+      when: not item.stat.exists
+
+    - name: Resize the images to desired disk size
+      ansible.builtin.command: "qemu-img resize /nvme/vms/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
+      register: resize_output
+      changed_when: not item.stat.exists
+      loop: "{{ destination_disks.results }}"
+      when: not item.stat.exists
+
+    - name: Ensure guest agent is enabled in XML
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ item.vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible for K3s</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>/var/lib/libvirt/qemu/nvram/{{ item.vm_name }}_VARS.fd</nvram>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='/nvme/vms/{{ item.vm_name }}.qcow2'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+      loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        autostart: "{{ vm_autostart }}"
+      loop: "{{ vms }}"
+
+    - name: Ensure VMs are started
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        state: running
+      loop: "{{ vms }}"
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      become: false
+      loop: "{{ vms }}"
+
+    - name: Add new VMs to dynamic inventory
+      ansible.builtin.add_host:
+        name: "{{ item.vm_name }}"
+        groups:
+          - spawned_vms
+          - "{{ 'k3s_primary' if loop_idx == 0 else 'k3s_agents' }}"
+        vm_name: "{{ item.vm_name }}"
+        static_ip: "{{ item.static_ip }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ item.vm_name }}"
+        ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install_map[item.vm_name] }}"
+        k3s_token: "{{ k3s_token }}"
+        k3s_version: "{{ k3s_version }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: item
+        index_var: loop_idx
+
+- name: Provision, configure, and install baseline tools on spawned VMs sequentially
+  hosts: spawned_vms
+  serial: 1
+  gather_facts: true
+  tasks:
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    - name: Configure OS, hostname, user, and network (Day 1 initial setup)
+      when: is_fresh_install
+      block:
+        - name: Expand root partition and filesystem
+          ansible.builtin.shell: |
+            ROOT_PART=$(findmnt -n -o SOURCE /)
+            ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+            ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+            growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+            FS_TYPE=$(findmnt -n -o FSTYPE /)
+            if [ "$FS_TYPE" = "xfs" ]; then
+              xfs_growfs /
+            else
+              resize2fs "$ROOT_PART"
+            fi
+          args:
+            executable: /bin/bash
+          register: growpart_result
+          changed_when: "'CHANGED' in growpart_result.stdout"
+          failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+          become: true
+
+        - name: Set hostname to '{{ vm_name }}'
+          ansible.builtin.hostname:
+            name: "{{ vm_name }}"
+          become: yes
+
+        - name: Add all cluster VM hostnames and IPs to /etc/hosts
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
+            line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
+            state: present
+          loop: "{{ groups['spawned_vms'] }}"
+          become: yes
+
+        # - name: Enable serial getty on ttyS0
+        #   ansible.builtin.systemd:
+        #     name: serial-getty@ttyS0.service
+        #     enabled: true
+        #     state: started
+        #   become: yes
+
+        - name: Ensure the user admin exists
+          ansible.builtin.user:
+            name: "{{ admin_user }}"
+            group: users
+            groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+            append: yes
+            state: present
+            create_home: yes
+            shell: /bin/bash
+            update_password: on_create
+            password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+          become: yes
+
+        - name: Create ssh directory
+          ansible.builtin.file:
+            path: /home/{{ admin_user }}/.ssh
+            state: directory
+            owner: "{{ admin_user }}"
+            group: users
+            mode: "0700"
+          become: yes
+
+        - name: Add SSH public key for admin user
+          ansible.posix.authorized_key:
+            user: "{{ admin_user }}"
+            state: present
+            key: "{{ lookup('file', ssh_pub_key_file) }}"
+          become: yes
+
+        # - name: Remove default cloud users if they exist
+        #   ansible.builtin.user:
+        #     name: "{{ item }}"
+        #     state: absent
+        #     remove: yes
+        #   become: yes
+        #   loop:
+        #     - ubuntu
+        #     - debian
+        #   when: item != admin_user
+
+        - name: Configure passwordless sudo for admin user
+          ansible.builtin.copy:
+            dest: "/etc/sudoers.d/{{ admin_user }}"
+            content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+            mode: "0440"
+            validate: /usr/sbin/visudo -cf %s
+          become: yes
+
+        - name: Purge existing systemd-networkd configuration directory
+          ansible.builtin.file:
+            path: /etc/systemd/network
+            state: absent
+          become: yes
+
+        - name: Ensure clean systemd-networkd directory exists
+          ansible.builtin.file:
+            path: /etc/systemd/network
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          become: yes
+
+        - name: Configure static IP in systemd-networkd
+          ansible.builtin.copy:
+            dest: /etc/systemd/network/10-static-en.network
+            content: |
+              [Match]
+              Name=e*
+
+              [Network]
+              Address={{ static_ip }}
+              {% for dns in dns_servers %}
+              DNS={{ dns }}
+              {% endfor %}
+
+              IPv6AcceptRA=no
+              [Route]
+              Destination=0.0.0.0/0
+              Gateway={{ gateway_ip }}
+              GatewayOnLink=yes
+              Metric=10
+            owner: root
+            group: root
+            mode: "0644"
+          become: yes
+
+        - name: Restart systemd-networkd to apply static IP configuration
+          ansible.builtin.systemd:
+            name: systemd-networkd
+            state: restarted
+          become: true
+
+        - name: Open necessary TCP ports in iptables
+          ansible.builtin.iptables:
+            chain: INPUT
+            protocol: tcp
+            destination_port: "{{ item }}"
+            jump: ACCEPT
+          loop:
+            - "6443"
+            - "6444"
+            - "2379"
+            - "2380"
+            - "10250"
+            - "10251"
+            - "10252"
+            - "10253"
+            - "10254"
+            - "10255"
+            - "10256"
+          become: yes
+
+        - name: Ensure /etc/systemd/scripts directory exists
+          ansible.builtin.file:
+            path: /etc/systemd/scripts
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          become: yes
+
+        - name: Save iptables rules
+          ansible.builtin.shell: iptables-save > /etc/systemd/scripts/ip4save
+          become: yes
+          changed_when: false
+
+        - name: Display VM Hostname and IP address summary
+          ansible.builtin.debug:
+            msg:
+              - "=========================================="
+              - " VM Provisioning Summary"
+              - " Hostname: {{ vm_name }}"
+              - " Configured IP: {{ static_ip }}"
+              - "=========================================="
+
+- name: Upgrade packages and install baseline tools on spawned VMs sequentially
+  hosts: spawned_vms
+  serial: 1
+  gather_facts: true
+  tasks:
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.package:
+        name: "*"
+        state: latest
+      when: is_fresh_install
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.package:
+        name:
+          - mc
+          - htop
+          - curl
+          - wget
+          - gnupg
+        state: present
+      become: yes
+
+    # - name: Reboot VM to apply changes if fresh install
+    #   ansible.builtin.command: systemctl reboot
+    #   async: 1
+    #   poll: 0
+    #   changed_when: true
+    #   become: true
+    #   when: is_fresh_install
+
+    # - name: Wait for VM to become reachable after reboot
+    #   ansible.builtin.wait_for_connection:
+    #     delay: 10
+    #     sleep: 5
+    #     timeout: 60
+    #   when: is_fresh_install
+
+- name: Initialize K3s on Primary Node
+  hosts: k3s_primary
+  gather_facts: false
+  # vars:
+  #   k3s_token: "mandarynka"
+  #   k3s_version: "v1.36.4+k3s1"
+  tasks:
+    - name: Download K3s installation script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /opt/k3s.sh
+        mode: "0755"
+      become: yes
+
+    - name: Install K3s server
+      ansible.builtin.shell: |
+        INSTALL_K3S_CHANNEL="stable" \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_EXEC="server" \
+        INSTALL_K3S_SKIP_SELINUX_RPM=true \
+        /opt/k3s.sh --cluster-init --token {{ k3s_token }} --cluster-cidr=172.25.0.0/16 --service-cidr=10.96.0.0/16
+      args:
+        creates: /etc/rancher/k3s/k3s.yaml
+      become: yes
+
+    - name: Ensure /etc/rancher/k3s directory exists
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: yes
+
+    - name: Set permissions on k3s.yaml
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/k3s.yaml
+        mode: "0644"
+      become: yes
+
+    # - name: Configure k3s kubeconfig permissions
+    #   ansible.builtin.copy:
+    #     dest: /etc/rancher/k3s/config.yaml
+    #     content: |
+    #       write-kubeconfig-mode: "0644"
+    #     owner: root
+    #     group: root
+    #     mode: "0644"
+    #   become: yes
+
+    # - name: Ensure .kube directory exists for admin_user
+    #   ansible.builtin.file:
+    #     path: "/home/{{ admin_user }}/.kube"
+    #     state: directory
+    #     owner: "{{ admin_user }}"
+    #     group: users
+    #     mode: "0755"
+    #   become: yes
+
+    # - name: Copy kubeconfig to user home
+    #   ansible.builtin.copy:
+    #     src: /etc/rancher/k3s/k3s.yaml
+    #     dest: "/home/{{ admin_user }}/.kube/config"
+    #     remote_src: true
+    #     owner: "{{ admin_user }}"
+    #     group: users
+    #     mode: "0600"
+    #   become: yes
+
+    - name: Set primary_ip fact
+      ansible.builtin.set_fact:
+        primary_ip: "{{ static_ip.split('/')[0] }}"
+
+- name: Join Worker nodes to K3s cluster
+  hosts: k3s_agents
+  serial: 1
+  gather_facts: false
+  # vars:
+  #   k3s_token: "mandarynka"
+  #   k3s_version: "v1.36.4+k3s1"
+  tasks:
+    - name: Download K3s installation script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /opt/k3s.sh
+        mode: "0755"
+      become: yes
+
+    - name: Install K3s agent
+      ansible.builtin.shell: |
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_SKIP_SELINUX_RPM=true \
+        INSTALL_K3S_EXEC="agent" \
+        K3S_TOKEN="{{ k3s_token }}" \
+        /opt/k3s.sh --server https://{{ hostvars[groups['k3s_primary'][0]]['primary_ip'] }}:6443
+      args:
+        creates: /etc/systemd/system/k3s-agent.service
+      become: yes
+
+# Required collections on Ansible control node:
+# ansible-galaxy collection install community.libvirt ansible.posix
