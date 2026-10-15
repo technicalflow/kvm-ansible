@@ -1,0 +1,713 @@
+---
+- name: Deploy KVM VM using local Debian image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "mskladb13smbs01"
+    vm_memory_kb: 1048576 # 1024 MB
+    vm_vcpus: 4
+    disk_size: "32G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    vm_autostart: false
+    static_ip: "192.168.50.170/23"
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/debian13.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure required packages are installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /data/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Define VM XML configuration with Qemu Agent channel enabled
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <vmport state="off"/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <!-- QEMU Guest Agent Channel -->
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+            </devices>
+          </domain>
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart }}"
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      become: false
+
+    - name: Add new VM to dynamic inventory (via Out-of-band Channel)
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: spawned_vms
+        vm_name: "{{ vm_name }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ vm_name }}"
+        ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
+
+    #    - name: Pause for 30 seconds
+    #      ansible.builtin.pause:
+    #        seconds: 30
+
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+- name: Provision the spawned VM
+  hosts: spawned_vms
+  gather_facts: true
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Expand root partition and filesystem
+      ansible.builtin.shell: |
+        ROOT_PART=$(findmnt -n -o SOURCE /)
+        ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+        ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+        growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+        FS_TYPE=$(findmnt -n -o FSTYPE /)
+        if [ "$FS_TYPE" = "xfs" ]; then
+          xfs_growfs /
+        else
+          resize2fs "$ROOT_PART"
+        fi
+      args:
+        executable: /bin/bash
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+      become: true
+
+    # - name: Configure cloud-init to grow the root filesystem
+    #   ansible.builtin.copy:
+    #     dest: /etc/cloud/cloud.cfg.d/99-grow-root.cfg
+    #     content: |
+    #       growpart:
+    #         mode: auto
+    #         devices:
+    #           - /
+    #       resize_rootfs: true
+    #     owner: root
+    #     group: root
+    #     mode: "0644"
+    #   become: yes
+
+    # - name: Grow the root partition with cloud-init
+    #   ansible.builtin.command: cloud-init single --name cc_growpart --frequency always
+    #   become: yes
+
+    # - name: Grow the root filesystem with cloud-init
+    #   ansible.builtin.command: cloud-init single --name cc_resizefs --frequency always
+    #   become: yes
+
+    # - name: Expand root partition and filesystem
+    # ansible.builtin.shell: |
+    #   growpart /dev/vda 3
+    #   resize2fs /dev/vda3
+    # args:
+    #   executable: /bin/bash
+    # become: true
+
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
+      become: yes
+
+    # - name: Configure GRUB kernel cmdline for serial console
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/default/grub
+    #     regexp: '^GRUB_CMDLINE_LINUX='
+    #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+    #     backrefs: no
+    #   register: grub_serial_console
+    #   become: yes
+
+    # - name: Rebuild grub config on Debian family
+    #   ansible.builtin.command: update-grub
+    #   when:
+    #     - ansible_os_family == 'Debian'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    # - name: Rebuild grub config on RedHat family
+    #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: yes
+
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+      become: yes
+
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
+      become: yes
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+      become: yes
+
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   become: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
+
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+      become: yes
+
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
+      become: yes
+
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: yes
+
+    - name: Configure static IP in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-static-en.network
+        content: |
+          [Match]
+          Name=e*
+
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+
+          IPv6AcceptRA=no
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
+      become: yes
+
+    - name: Restart systemd-networkd to apply static IP configuration
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+      become: true
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ ansible_facts['hostname'] }}"
+          - " Configured IP: {{ static_ip }}"
+          - " IPv4 Address: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+          - "=========================================="
+
+- name: Install packages and reboot
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.apt:
+        name: "*"
+        state: latest
+      # become: yes (Not needed: Agent connection is already root-privileged)
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.apt:
+        name:
+          - mc
+          - htop
+          - curl
+          - wget
+          - gnupg
+        state: present
+      become: true
+
+    - name: Reboot VM to apply network changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+      become: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 30
+
+- name: Provision Samba Active Directory Domain Controller (AD DC)
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  vars:
+    samba_realm: "HOMELAB.LAB"
+    samba_netbios_domain: "HOMELAB"
+    samba_domain: "homelab.lab"
+    samba_hostname: "{{ vm_name }}"
+    samba_ip: "{{ (static_ip | default(ansible_default_ipv4.address | default(''))).split('/')[0] }}"
+    samba_network: "{{ static_ip | ansible.utils.ipaddr('network') }}"
+    samba_interface: "br0"
+    samba_dns_forwarder: "9.9.9.9"
+    samba_admin_user: "dcadmin"
+    samba_admin_password: "{{ lookup('ansible.builtin.env', 'SAMBA_ADMIN_PASSWORD') | default('Password1000!!', true) }}"
+    samba_timezone: "Europe/Warsaw"
+
+  handlers:
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
+
+    - name: Restart samba-ad-dc
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        state: restarted
+
+  tasks:
+    - name: Check if Samba domain is already provisioned
+      ansible.builtin.stat:
+        path: /var/lib/samba/private/sam.ldb
+      register: samba_provisioned
+
+    - name: Configure /etc/hosts for Samba AD DC
+      ansible.builtin.copy:
+        dest: /etc/hosts
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          127.0.0.1 localhost
+          {{ samba_ip }} {{ samba_hostname }}.{{ samba_domain }} {{ samba_hostname }}
+
+          # The following lines are desirable for IPv6 capable hosts
+          ::1     ip6-localhost ip6-loopback
+          fe00::0 ip6-localnet
+          ff00::0 ip6-mcastprefix
+          ff02::1 ip6-allnodes
+          ff02::2 ip6-allrouters
+
+    - name: Install required packages for Samba AD DC
+      ansible.builtin.apt:
+        name:
+          - acl
+          - attr
+          - samba
+          - samba-dsdb-modules
+          - samba-vfs-modules
+          - smbclient
+          - winbind
+          - libpam-winbind
+          - libnss-winbind
+          - libpam-krb5
+          - krb5-config
+          - krb5-user
+          - dnsutils
+          - chrony
+          - net-tools
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Ensure standalone Samba services are stopped and masked
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+        daemon_reload: true
+      loop:
+        - smbd
+        - nmbd
+        - winbind
+      when: not samba_provisioned.stat.exists
+
+    - name: Check if default smb.conf exists
+      ansible.builtin.stat:
+        path: /etc/samba/smb.conf
+      register: default_smb_conf
+      when: not samba_provisioned.stat.exists
+
+    - name: Backup existing default smb.conf before provisioning
+      ansible.builtin.command: mv /etc/samba/smb.conf /etc/samba/smb.conf.old
+      when:
+        - not samba_provisioned.stat.exists
+        - default_smb_conf.stat.exists
+
+    - name: Provision Samba Active Directory domain
+      ansible.builtin.command:
+        cmd: >
+          samba-tool domain provision
+          --use-rfc2307
+          --server-role=dc
+          --host-ip="{{ samba_ip }}"
+          --dns-backend=SAMBA_INTERNAL
+          --realm="{{ samba_realm }}"
+          --domain="{{ samba_netbios_domain }}"
+          --adminpass="{{ samba_admin_password }}"
+          --option="dns forwarder={{ samba_dns_forwarder }}"
+          --option="interfaces={{ samba_interface }} lo"
+          --option="bind interfaces only=yes"
+          --option="template shell=/bin/bash"
+          --option="template homedir=/home/%U"
+          --option="winbind nss info=rfc2307"
+          --option="winbind use default domain=yes"
+          --option="allow dns updates=nonsecure and secure"
+          --option="write raw=yes"
+          --option="log level=1"
+          --option="aio read size=1"
+          --option="aio write size=1"
+          --option="server min protocol=SMB3"
+          --option="server signing=mandatory"
+          --option="smb encrypt=mandatory"
+        creates: /var/lib/samba/private/sam.ldb
+      no_log: false
+      when: not samba_provisioned.stat.exists
+
+    - name: Backup original /etc/krb5.conf
+      ansible.builtin.copy:
+        src: /etc/krb5.conf
+        dest: /etc/krb5.conf.orig
+        remote_src: true
+        force: false
+      when: not samba_provisioned.stat.exists
+
+    - name: Copy Samba-generated krb5.conf to /etc/krb5.conf
+      ansible.builtin.copy:
+        src: /var/lib/samba/private/krb5.conf
+        dest: /etc/krb5.conf
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: not samba_provisioned.stat.exists
+
+    - name: Disable and stop systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Remove immutable flag from /etc/resolv.conf if present
+      ansible.builtin.command: chattr -i /etc/resolv.conf
+      failed_when: false
+      changed_when: false
+
+    - name: Remove symlink /etc/resolv.conf if present
+      ansible.builtin.file:
+        path: /etc/resolv.conf
+        state: absent
+      when: not samba_provisioned.stat.exists
+
+    - name: Configure /etc/resolv.conf pointing to local Samba AD DNS
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Samba server IP address
+          nameserver {{ samba_ip }}
+
+          # Main domain for Samba
+          search {{ samba_domain }}
+
+    - name: Set immutable flag on /etc/resolv.conf
+      ansible.builtin.command: chattr +i /etc/resolv.conf
+      failed_when: false
+      changed_when: false
+
+    - name: Unmask, enable, and start samba-ad-dc service
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        masked: false
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Ensure sample share directory exists
+      ansible.builtin.file:
+        path: /srv/samba/data
+        state: directory
+        owner: root
+        group: users
+        mode: "0775"
+
+    - name: Append sample [data] share to /etc/samba/smb.conf
+      ansible.builtin.blockinfile:
+        path: /etc/samba/smb.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - DATA SHARE"
+        block: |
+          [data]
+              comment = Data Shared Folder
+              path = /srv/samba/data
+              read only = no
+              browseable = yes
+              guest ok = no
+              create mask = 0775
+              directory mask = 0775
+      notify: Restart samba-ad-dc
+
+    - name: Create directory for Samba NTP signed socket
+      ansible.builtin.file:
+        path: /var/lib/samba/ntp_signd
+        state: directory
+        owner: root
+        group: _chrony
+        mode: "0750"
+
+    - name: Configure Chrony for Samba AD NTP signing
+      ansible.builtin.blockinfile:
+        path: /etc/chrony/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - SAMBA AD CHRONY"
+        block: |
+          # bind the chrony service to IP address of the Samba AD
+          bindcmdaddress {{ samba_ip }}
+          allow {{ samba_network }}
+
+          # specify the ntpsigndsocket directory for the Samba AD
+          ntpsigndsocket /var/lib/samba/ntp_signd
+      notify: Restart chrony
+
+    - name: Set timezone to {{ samba_timezone }}
+      ansible.builtin.command: timedatectl set-timezone {{ samba_timezone }}
+      changed_when: false
+      failed_when: false
+
+    - name: Enable system NTP synchronization
+      ansible.builtin.command: timedatectl set-ntp true
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure chrony service is enabled and started
+      ansible.builtin.systemd:
+        name: chrony
+        enabled: true
+        state: started
+
+    - name: Ensure winbind is present in /etc/nsswitch.conf
+      ansible.builtin.replace:
+        path: /etc/nsswitch.conf
+        regexp: '^({{ item }}:(?!.*\bwinbind\b).*)$'
+        replace: '\1 winbind'
+      loop:
+        - passwd
+        - group
+        - shadow
+
+    - name: Verify Samba domain level
+      ansible.builtin.command: samba-tool domain level show
+      register: domain_level
+      changed_when: false
+
+    - name: Display Samba AD DC status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " Samba AD DC provisioning completed successfully!"
+          - " Realm: {{ samba_realm }}"
+          - " Domain: {{ samba_netbios_domain }}"
+          - " Server FQDN: {{ samba_hostname }}.{{ samba_domain }}"
+          - " IP: {{ samba_ip }}"
+          - " {{ domain_level.stdout_lines | default([]) }}"
+          - "=========================================="
+# ansible-galaxy collection install community.libvirt ansible.posix

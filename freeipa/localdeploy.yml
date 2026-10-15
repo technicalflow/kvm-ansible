@@ -1,0 +1,645 @@
+---
+- name: Deploy KVM VM using local Oracle Linux 9 image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "msklaoel9free01"
+    vm_memory_kb: 4194304 # 4096 MB
+    vm_vcpus: 4
+    disk_size: "64G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    vm_autostart: false
+    static_ip: "192.168.50.160/23"
+    gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/ol9withuefi.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware is installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /data/VMS
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Ensure guest agent is enabled in XML
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>{{ uefi_vars_path }}</nvram>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+            </devices>
+          </domain>
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart }}"
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      become: false
+
+    - name: Add new VM to dynamic inventory (via Out-of-band Channel)
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: spawned_vms
+        vm_name: "{{ vm_name }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ vm_name }}"
+        ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
+
+    #    - name: Pause for 30 seconds
+    #      ansible.builtin.pause:
+    #        seconds: 30
+
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+- name: Provision the spawned VM
+  hosts: spawned_vms
+  gather_facts: true
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Expand OL9 root LVM volume
+      ansible.builtin.shell: |
+        PV_DEV=$(pvs --noheadings -o pv_name | tr -d ' ')
+        echo fix | parted ---pretend-input-tty $(echo "$PV_DEV" | sed 's/p\?[0-9]*$//') print
+        # growpart $(echo "$PV_DEV" | sed 's/p\?[0-9]*$//') $(echo "$PV_DEV" | grep -o '[0-9]*$')
+        parted -s $(echo "$PV_DEV" | sed 's/p\?[0-9]*$//') resizepart $(echo "$PV_DEV" | grep -o '[0-9]*$') 100%
+        pvresize $(pvs --noheadings -o pv_name)
+        lvextend -r -l +100%FREE $(findmnt -n -o SOURCE /)
+      args:
+        executable: /bin/bash
+      become: true
+
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
+      become: yes
+
+    # - name: Configure GRUB kernel cmdline for serial console
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/default/grub
+    #     regexp: '^GRUB_CMDLINE_LINUX='
+    #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+    #     backrefs: no
+    #   register: grub_serial_console
+    #   become: yes
+
+    # - name: Rebuild grub config on Debian family
+    #   ansible.builtin.command: update-grub
+    #   when:
+    #     - ansible_os_family == 'Debian'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    # - name: Rebuild grub config on RedHat family
+    #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - grub_serial_console.changed
+    #   become: yes
+
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: yes
+
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+      become: yes
+
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
+      become: yes
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+      become: yes
+
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   become: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
+
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+      become: yes
+
+- name: Configure static IP
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Ensure NetworkManager is installed and running
+      ansible.builtin.package:
+        name: NetworkManager
+        state: present
+      become: yes
+
+    - name: Enable and start NetworkManager
+      ansible.builtin.systemd:
+        name: NetworkManager
+        enabled: true
+        state: started
+      become: yes
+
+    - name: Identify the primary Ethernet interface
+      ansible.builtin.set_fact:
+        primary_ethernet_interface: "{{ ansible_default_ipv4.interface }}"
+
+    - name: Configure static IPv4 connection with NetworkManager
+      ansible.builtin.shell: |
+        set -e
+        if ! nmcli -t -f NAME connection show | grep -Fxq 'static'; then
+          nmcli connection add \
+            type ethernet \
+            ifname '{{ primary_ethernet_interface }}' \
+            con-name 'static'
+        fi
+        nmcli connection modify 'static' \
+          ipv4.method manual \
+          ipv4.addresses '{{ static_ip }}' \
+          ipv4.gateway '{{ gateway_ip }}' \
+          ipv4.dns '{{ dns_servers | join(',') }}' \
+          connection.autoconnect yes \
+          connection.autoconnect-priority 100
+      args:
+        executable: /bin/bash
+      become: yes
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ ansible_facts['hostname'] }}"
+          - " Configured IP: {{ static_ip }}"
+          - " Auto IPv4 Address: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+          - "=========================================="
+
+- name: Update and install baseline tools on the spawned VM
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Set FILTER_RPC_ARGS in /etc/sysconfig/qemu-ga
+      ansible.builtin.lineinfile:
+        path: /etc/sysconfig/qemu-ga
+        regexp: "^#?FILTER_RPC_ARGS="
+        line: 'FILTER_RPC_ARGS=""'
+        state: present
+
+    # - name: Set SELINUX to permissive in /etc/selinux/config
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/selinux/config
+    #     regexp: '^SELINUX='
+    #     line: 'SELINUX=permissive'
+    #     state: present
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        exclude:
+          - qemu-guest-agent*
+      # become: yes (Not needed: Agent connection is already root-privileged)
+
+    - name: Enable EPEL repository (Oracle Linux)
+      ansible.builtin.dnf:
+        name: "oracle-epel-release-el{{ ansible_distribution_major_version }}"
+        state: present
+      become: true
+      when: ansible_distribution == "OracleLinux"
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.package:
+        name:
+          - mc
+          - htop
+          - curl
+          - wget
+          - gnupg
+        state: present
+      become: yes
+
+    - name: Reboot VM to apply network changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+      become: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 30
+
+- name: Deploy and Configure FreeIPA Server
+  hosts: "{{ target_hosts | default('spawned_vms:ipaserver:freeipa_server') }}"
+  gather_facts: true
+  become: true
+  vars:
+    ipa_domain: "homenet.lab"
+    ipa_realm: "{{ ipa_domain | upper }}"
+    ipa_hostname: "{{ (vm_name | default(inventory_hostname)).split('.')[0] }}"
+    ipa_hostname_fqdn: "{{ ipa_hostname }}.{{ ipa_domain }}"
+    ipa_ip_address: "{{ (static_ip | default(ansible_default_ipv4.address | default(''))).split('/')[0] }}"
+    ipa_dns_forwarder: "9.9.9.9"
+    ipa_timezone: "Europe/Warsaw"
+    ipa_dir_manager_password: "simplepassword1"
+    ipa_admin_password: "simplepassword2"
+
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when:
+        - is_fresh_install is defined
+        - not is_fresh_install
+
+    # =========================================================================
+    # System Pre-requisites & Environment (from provision.sh)
+    # =========================================================================
+
+    - name: Configure system locale in /etc/environment
+      ansible.builtin.lineinfile:
+        path: /etc/environment
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+        state: present
+      loop:
+        - { key: "LANG", value: "en_US.utf-8" }
+        - { key: "LC_ALL", value: "en_US.utf-8" }
+        - { key: "LANGUAGE", value: "en_US.utf-8" }
+
+    - name: Set system FQDN hostname
+      ansible.builtin.hostname:
+        name: "{{ ipa_hostname_fqdn }}"
+
+    - name: Set timezone to {{ ipa_timezone }}
+      ansible.builtin.command: timedatectl set-timezone {{ ipa_timezone }}
+      changed_when: false
+
+    - name: Enable NTP synchronization
+      ansible.builtin.command: timedatectl set-ntp yes
+      changed_when: false
+
+    - name: Check active swap
+      ansible.builtin.command: swapon --show
+      register: swap_check
+      changed_when: false
+
+    - name: Turn swap off immediately
+      ansible.builtin.command: swapoff -a
+      when: swap_check.stdout != ""
+
+    - name: Stop and mask swap.target
+      ansible.builtin.systemd:
+        name: swap.target
+        state: stopped
+        masked: true
+
+    - name: Comment out swap entries in /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#\n]+\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: Ensure /etc/hosts has FreeIPA FQDN and IP mapping
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*(\s+|^){{ ipa_hostname_fqdn | regex_escape }}(\s+|$)'
+        line: "{{ ipa_ip_address }} {{ ipa_hostname_fqdn }} {{ ipa_hostname }}"
+        state: present
+
+    - name: Disable and stop systemd-resolved if present
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Configure /etc/resolv.conf for initial DNS resolution
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver {{ ipa_dns_forwarder }}
+          search {{ ipa_domain }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    # =========================================================================
+    # Firewall Configuration
+    # =========================================================================
+
+    - name: Ensure firewalld is installed and running
+      ansible.builtin.package:
+        name: firewalld
+        state: present
+
+    - name: Enable and start firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: true
+        state: started
+
+    - name: Open required firewall services for FreeIPA
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - ssh
+        - freeipa-ldap
+        - freeipa-ldaps
+        - dns
+        - ntp
+        - http
+        - https
+        - kerberos
+        - kadmin
+
+    # =========================================================================
+    # FreeIPA Server Installation
+    # =========================================================================
+
+    - name: Install FreeIPA server and DNS packages
+      ansible.builtin.dnf:
+        name:
+          - ipa-server
+          - ipa-server-dns
+          - bind-dyndb-ldap
+        state: present
+
+    - name: Run ipa-server-install unattended
+      ansible.builtin.shell: |
+        umask 0022
+        ipa-server-install \
+          --unattended \
+          --realm={{ ipa_realm }} \
+          --domain={{ ipa_domain }} \
+          --ds-password={{ ipa_dir_manager_password }} \
+          --admin-password={{ ipa_admin_password }} \
+          --hostname={{ ipa_hostname_fqdn }} \
+          --ip-address={{ ipa_ip_address }} \
+          --setup-dns \
+          --auto-forwarders \
+          --forwarder={{ ipa_dns_forwarder }} \
+          --auto-reverse \
+          --no-host-dns
+      args:
+        creates: /etc/ipa/default.conf
+        executable: /bin/bash
+
+    - name: Display FreeIPA installation summary
+      ansible.builtin.debug:
+        msg:
+          - "=============================================================================="
+          - "FreeIPA Installation Completed Successfully!"
+          - "=============================================================================="
+          - "Admin Web UI: https://{{ ipa_hostname_fqdn }}/ipa/ui"
+          - "Username: admin"
+          - "Password: {{ ipa_admin_password }}"
+          - ""
+          - "Please remember to obtain a Kerberos ticket before using CLI tools:"
+          - "kinit admin"
+          - "=============================================================================="
+
+- name: Run FreeIPA provisioning
+  import_playbook: provisionusers.yml
+  vars:
+    ipa_admin_password: "{{ ipa_admin_password }}"
+    ipa_domain: "{{ ipa_domain }}"
+    ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+
+# ==============================================================================
+# Helpful Reference Commands (from provision.sh):
+# ==============================================================================
+#
+# User & Host Management:
+#   ipa user-add brian --password - -homedir=/home/brian --shell=/bin/bash
+#   ipa host-add testvm.home.lab -force -ip-address=10.127.0.211 -password=simplepassword1
+#
+# Join Ubuntu Client:
+#   sudo apt update && sudo apt install freeipa-client
+#   sudo ipa-client-install --mkhomedir --password=simplepassword1
+#
+# Add FreeIPA Replica:
+#   ipa-client-install --domain=home.lab --realm=HOME.LAB
+#   kinit admin
+#   ipa-replica-install --setup-ca --setup-dns --auto-forwarders
+#
+# Topology & Verification:
+#   ipa server-find
+#   ipa topologysuffix-show domain
+#   ipa topologysegment-find domain
+#   ipa topologysuffix-verify domain
+#
+# DNS Record examples:
+#   ipa dnsrecord-add home.lab mail --a-rec=10.0.0.25 --a-create-reverse
+#   ipa dnsrecord-add home.lab @ --mx-rec="10 mail.home.lab."
+#   ipa dnsrecord-add home.lab _imaps._tcp --srv-rec="0 1 993 mail.home.lab."
+#   ipa dnsrecord-add home.lab _submission._tcp --srv-rec="0 1 587 mail.home.lab."
+# Collection Requirement:
+#   ansible-galaxy collection install ansible.posix
+# ==============================================================================
+
+# Required collections:
+# ansible-galaxy collection install community.libvirt ansible.posix
