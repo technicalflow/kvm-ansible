@@ -443,12 +443,14 @@
     ipa_dns_forwarder: "9.9.9.9"
     ipa_timezone: "Europe/Warsaw"
     ipa_dir_manager_password: "simplepassword1"
+    ipa_admin_principal: "{{ admin_user }}"
     ipa_admin_password: "simplepassword2"
 
   tasks:
     - name: Preserve FreeIPA variables for provisioning
       ansible.builtin.set_fact:
         freeipa_admin_password: "{{ ipa_admin_password }}"
+        freeipa_admin_principal: "{{ ipa_admin_principal }}"
         freeipa_domain: "{{ ipa_domain }}"
         freeipa_ssh_pub_key_file: "{{ ssh_pub_key_file }}"
 
@@ -583,6 +585,7 @@
           --domain={{ ipa_domain }} \
           --ds-password={{ ipa_dir_manager_password }} \
           --admin-password={{ ipa_admin_password }} \
+          --admin-name={{ ipa_admin_principal }} \
           --hostname={{ ipa_hostname_fqdn }} \
           --ip-address={{ ipa_ip_address }} \
           --setup-dns \
@@ -601,17 +604,18 @@
           - "FreeIPA Installation Completed Successfully!"
           - "=============================================================================="
           - "Admin Web UI: https://{{ ipa_hostname_fqdn }}/ipa/ui"
-          - "Username: admin"
+          - "Username: {{ ipa_admin_principal }}"
           - "Password: {{ ipa_admin_password }}"
           - ""
           - "Please remember to obtain a Kerberos ticket before using CLI tools:"
-          - "kinit admin"
+          - "kinit {{ ipa_admin_principal }}"
           - "=============================================================================="
 
 - name: Run FreeIPA provisioning
   import_playbook: provisionusers.yml
   vars:
     ipa_admin_password: "{{ freeipa_admin_password }}"
+    ipa_admin_principal: "{{ freeipa_admin_principal }}"
     ipa_domain: "{{ freeipa_domain }}"
     ssh_pub_key_file: "{{ freeipa_ssh_pub_key_file }}"
 
@@ -629,7 +633,7 @@
 #
 # Add FreeIPA Replica:
 #   ipa-client-install --domain=home.lab --realm=HOME.LAB
-#   kinit admin
+#   kinit madmin
 #   ipa-replica-install --setup-ca --setup-dns --auto-forwarders
 #
 # Topology & Verification:

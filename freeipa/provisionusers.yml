@@ -7,22 +7,31 @@
 
   module_defaults:
     freeipa.ansible_freeipa.ipagroup:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipauser:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipapwpolicy:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipahost:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipahostgroup:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipahbacrule:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipasudocmd:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipasudorule:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
     freeipa.ansible_freeipa.ipadnsrecord:
+      ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
 
   tasks:
@@ -61,6 +70,7 @@
         maxlife: 90 # Days before password expires
         minlength: 14 # Minimum password length
         maxfail: 5 # Lockout after 5 failed attempts
+        priority: 1
         state: present
 
     # 5. Manage a FreeIPA Host
@@ -82,8 +92,10 @@
     - name: Allow developers to SSH into webservers
       freeipa.ansible_freeipa.ipahbacrule:
         name: dev_ssh_web
-        usergroup: developers
-        hostgroup: webservers
+        group:
+          - developers
+        hostgroup:
+          - webservers
         hbacsvc:
           - sshd
         state: present
@@ -97,8 +109,10 @@
     - name: Allow developers to restart nginx on webservers
       freeipa.ansible_freeipa.ipasudorule:
         name: dev_nginx_restart
-        usergroup: developers
-        hostgroup: webservers
+        group:
+          - developers
+        hostgroup:
+          - webservers
         allow_sudocmd:
           - /bin/systemctl restart nginx
         state: present
