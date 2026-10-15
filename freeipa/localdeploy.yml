@@ -3,7 +3,7 @@
   hosts: localhost
   become: true
   vars:
-    vm_name: "msklaoel9free01"
+    vm_name: "msksioel9fipa01"
     vm_memory_kb: 4194304 # 4096 MB
     vm_vcpus: 4
     disk_size: "64G"
@@ -391,6 +391,7 @@
     #     regexp: '^SELINUX='
     #     line: 'SELINUX=permissive'
     #     state: present
+
     - name: Upgrade all installed packages OS-agnostic way
       ansible.builtin.dnf:
         name: "*"
@@ -443,7 +444,7 @@
     ipa_dns_forwarder: "9.9.9.9"
     ipa_timezone: "Europe/Warsaw"
     ipa_dir_manager_password: "simplepassword1"
-    ipa_admin_principal: "{{ admin_user }}"
+    ipa_admin_principal: "admin"
     ipa_admin_password: "simplepassword2"
 
   tasks:
@@ -585,7 +586,6 @@
           --domain={{ ipa_domain }} \
           --ds-password={{ ipa_dir_manager_password }} \
           --admin-password={{ ipa_admin_password }} \
-          --admin-name={{ ipa_admin_principal }} \
           --hostname={{ ipa_hostname_fqdn }} \
           --ip-address={{ ipa_ip_address }} \
           --setup-dns \
@@ -633,7 +633,7 @@
 #
 # Add FreeIPA Replica:
 #   ipa-client-install --domain=home.lab --realm=HOME.LAB
-#   kinit madmin
+#   kinit admin
 #   ipa-replica-install --setup-ca --setup-dns --auto-forwarders
 #
 # Topology & Verification:

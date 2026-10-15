@@ -1,0 +1,128 @@
+---
+- name: Verify Samba configuration
+  ansible.builtin.command: testparm --suppress-prompt
+  changed_when: false
+
+- name: Ensure Administrator password never expires
+  ansible.builtin.command:
+    cmd: samba-tool user setexpiry {{ samba_admin_user }} --noexpiry
+  changed_when: false
+  no_log: true
+
+- name: Ensure Samba share directory exists
+  ansible.builtin.file:
+    path: "{{ samba_share_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check whether Samba share user exists
+  ansible.builtin.command:
+    cmd: samba-tool user show {{ samba_share_user }}
+  register: samba_share_user_check
+  changed_when: false
+  failed_when: false
+
+- name: Require a password when creating the Samba share user
+  ansible.builtin.assert:
+    that:
+      - samba_share_user_password | length > 0
+    fail_msg: Set SAMBA_SHARE_USER_PASSWORD before creating the Samba share user.
+  when: samba_share_user_check.rc != 0
+
+- name: Create Samba share user
+  ansible.builtin.command:
+    cmd: samba-tool user create {{ samba_share_user }} {{ samba_share_user_password }}
+  when: samba_share_user_check.rc != 0
+  no_log: true
+
+# - name: Check whether share group exists
+#   ansible.builtin.command:
+#     cmd: samba-tool group show {{ samba_share_group }}
+#   register: samba_share_group_check
+#   changed_when: false
+#   failed_when: false
+
+- name: Create share group
+  ansible.builtin.command:
+    cmd: samba-tool group add {{ samba_share_group }}
+  when: samba_share_group_check.rc != 0
+
+# - name: Check whether Linux administrators group exists
+#   ansible.builtin.command:
+#     cmd: samba-tool group show {{ samba_admin_group }}
+#   register: samba_admin_group_check
+#   changed_when: false
+#   failed_when: false
+
+- name: Create Linux administrators group
+  ansible.builtin.command:
+    cmd: samba-tool group add {{ samba_admin_group }}
+  when: samba_admin_group_check.rc != 0
+
+# - name: Check share user group memberships
+#   ansible.builtin.command:
+#     cmd: samba-tool group listmembers {{ item }}
+#   loop:
+#     - "{{ samba_share_group }}"
+#     - "{{ samba_admin_group }}"
+#   register: samba_group_members
+#   changed_when: false
+
+- name: Add share user to required groups
+  ansible.builtin.command:
+    cmd: samba-tool group addmembers {{ item.item }} {{ samba_share_user }}
+  loop: "{{ samba_group_members.results }}"
+  when: samba_share_user not in item.stdout
+
+- name: Apply Samba share directory ownership and permissions
+  ansible.builtin.file:
+    path: "{{ samba_share_path }}"
+    state: directory
+    owner: "{{ samba_share_user }}"
+    group: "{{ samba_share_group }}"
+    mode: "0775"
+
+- name: Set Samba domain minimum password length
+  ansible.builtin.command:
+    cmd: samba-tool domain passwordsettings set --min-pwd-length=8
+  changed_when: false
+  no_log: true
+
+- name: Set Samba domain maximum password age
+  ansible.builtin.command:
+    cmd: samba-tool domain passwordsettings set --max-pwd-age=180
+  changed_when: false
+  no_log: true
+
+- name: Check whether reverse DNS zone exists
+  ansible.builtin.command:
+    cmd: samba-tool dns zonelist {{ samba_dns_server }} -U {{ samba_admin_user }}%{{ samba_admin_password }}
+  register: samba_dns_zones
+  changed_when: false
+  no_log: true
+
+- name: Create reverse DNS zone
+  ansible.builtin.command:
+    cmd: samba-tool dns zonecreate {{ samba_dns_server }} {{ samba_reverse_zone }} -U {{ samba_admin_user }}%{{ samba_admin_password }}
+  when: samba_reverse_zone not in samba_dns_zones.stdout
+  no_log: true
+
+- name: Check whether reverse PTR record exists
+  ansible.builtin.command:
+    cmd: samba-tool dns query {{ samba_dns_server }} {{ samba_reverse_zone }} {{ samba_reverse_record }} PTR -U {{ samba_admin_user }}%{{ samba_admin_password }}
+  register: samba_ptr_record
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Create reverse PTR record
+  ansible.builtin.command:
+    cmd: samba-tool dns add {{ samba_dns_server }} {{ samba_reverse_zone }} {{ samba_reverse_record }} PTR {{ samba_server_fqdn }} -U {{ samba_admin_user }}%{{ samba_admin_password }}
+  when: samba_ptr_record.rc != 0
+  no_log: true
+
+- name: Run Samba DNS update
+  ansible.builtin.command: samba_dnsupdate --verbose
+  changed_when: false

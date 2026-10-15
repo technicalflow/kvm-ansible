@@ -3,14 +3,14 @@
   hosts: localhost
   become: true
   vars:
-    vm_name: "mskladb13smbs01"
+    vm_name: "msksidb13smbs01"
     vm_memory_kb: 1048576 # 1024 MB
     vm_vcpus: 4
     disk_size: "32G"
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
-    static_ip: "192.168.50.170/23"
+    static_ip: "192.168.50.130/23"
     gateway_ip: "192.168.50.250"
     dns_servers:
       - "192.168.50.242"
@@ -447,6 +447,16 @@
     samba_interface: "{{ ansible_facts['default_ipv4']['interface'] }}"
     samba_dns_forwarder: "9.9.9.9"
     samba_admin_password: "{{ lookup('ansible.builtin.env', 'SAMBA_ADMIN_PASSWORD') | default('Password1000!!', true) }}"
+    samba_admin_user: "Administrator"
+    samba_share_user: "dcadmin"
+    samba_share_user_password: "{{ lookup('ansible.builtin.env', 'SAMBA_SHARE_USER_PASSWORD') | default('Password2000!!', true) }}"
+    samba_share_group: "datashare"
+    samba_admin_group: "linux_admins"
+    samba_share_path: "/data"
+    samba_dns_server: "{{ samba_ip }}"
+    samba_reverse_zone: "200.168.192.in-addr.arpa"
+    samba_reverse_record: "1"
+    samba_server_fqdn: "{{ samba_hostname }}.{{ samba_domain }}"
     samba_timezone: "Europe/Warsaw"
 
   handlers:
@@ -625,7 +635,7 @@
 
     - name: Ensure sample share directory exists
       ansible.builtin.file:
-        path: /srv/samba/data
+        path: /data
         state: directory
         owner: root
         group: users
@@ -638,7 +648,7 @@
         block: |
           [data]
                   comment = Data Shared Folder
-                  path = /srv/samba/data
+                  path = /data
                   read only = no
                   browseable = yes
                   guest ok = no
@@ -692,6 +702,9 @@
         - passwd
         - group
         - shadow
+
+    - name: Configure Samba AD users, share permissions, and DNS
+      ansible.builtin.include_tasks: provisionusers.yml
 
     - name: Verify Samba domain level
       ansible.builtin.command: samba-tool domain level show
