@@ -443,10 +443,9 @@
     samba_domain: "homelab.lab"
     samba_hostname: "{{ vm_name }}"
     samba_ip: "{{ (static_ip | default(ansible_default_ipv4.address | default(''))).split('/')[0] }}"
-    samba_network: "{{ static_ip | ansible.utils.ipaddr('network') }}"
-    samba_interface: "br0"
+    samba_network: "{{ ansible_facts['default_ipv4']['network'] }}/{{ static_ip.split('/')[-1] }}"
+    samba_interface: "{{ ansible_facts['default_ipv4']['interface'] }}"
     samba_dns_forwarder: "9.9.9.9"
-    samba_admin_user: "dcadmin"
     samba_admin_password: "{{ lookup('ansible.builtin.env', 'SAMBA_ADMIN_PASSWORD') | default('Password1000!!', true) }}"
     samba_timezone: "Europe/Warsaw"
 
@@ -638,13 +637,13 @@
         marker: "# {mark} ANSIBLE MANAGED BLOCK - DATA SHARE"
         block: |
           [data]
-              comment = Data Shared Folder
-              path = /srv/samba/data
-              read only = no
-              browseable = yes
-              guest ok = no
-              create mask = 0775
-              directory mask = 0775
+                  comment = Data Shared Folder
+                  path = /srv/samba/data
+                  read only = no
+                  browseable = yes
+                  guest ok = no
+                  create mask = 0775
+                  directory mask = 0775
       notify: Restart samba-ad-dc
 
     - name: Create directory for Samba NTP signed socket

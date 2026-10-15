@@ -446,6 +446,12 @@
     ipa_admin_password: "simplepassword2"
 
   tasks:
+    - name: Preserve FreeIPA variables for provisioning
+      ansible.builtin.set_fact:
+        freeipa_admin_password: "{{ ipa_admin_password }}"
+        freeipa_domain: "{{ ipa_domain }}"
+        freeipa_ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
       when:
@@ -605,9 +611,9 @@
 - name: Run FreeIPA provisioning
   import_playbook: provisionusers.yml
   vars:
-    ipa_admin_password: "{{ ipa_admin_password }}"
-    ipa_domain: "{{ ipa_domain }}"
-    ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+    ipa_admin_password: "{{ freeipa_admin_password }}"
+    ipa_domain: "{{ freeipa_domain }}"
+    ssh_pub_key_file: "{{ freeipa_ssh_pub_key_file }}"
 
 # ==============================================================================
 # Helpful Reference Commands (from provision.sh):
