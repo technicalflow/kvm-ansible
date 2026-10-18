@@ -16,3 +16,15 @@ And replacing ansible block "Create standalone VM disk from local template" with
       until: download_image is success
       retries: 3
       delay: 5
+
+Additional Ansible collections required:
+
+    ansible-galaxy collection install \
+      community.general \
+      community.libvirt \
+      ansible.posix \
+      community.docker \
+      community.routeros \
+      freeipa.ansible_freeipa
+
+and for mikrotik also `pip install ansible-pylibssh` is required

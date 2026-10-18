@@ -10,7 +10,7 @@
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
-    static_ip: "192.168.50.130/23"
+    static_ip: "192.168.50.170/23"
     gateway_ip: "192.168.50.250"
     dns_servers:
       - "192.168.50.242"
