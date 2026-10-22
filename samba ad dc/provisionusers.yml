@@ -37,38 +37,38 @@
   when: samba_share_user_check.rc != 0
   no_log: true
 
-# - name: Check whether share group exists
-#   ansible.builtin.command:
-#     cmd: samba-tool group show {{ samba_share_group }}
-#   register: samba_share_group_check
-#   changed_when: false
-#   failed_when: false
+- name: Check whether share group exists
+  ansible.builtin.command:
+    cmd: samba-tool group show {{ samba_share_group }}
+  register: samba_share_group_check
+  changed_when: false
+  failed_when: false
 
 - name: Create share group
   ansible.builtin.command:
     cmd: samba-tool group add {{ samba_share_group }}
   when: samba_share_group_check.rc != 0
 
-# - name: Check whether Linux administrators group exists
-#   ansible.builtin.command:
-#     cmd: samba-tool group show {{ samba_admin_group }}
-#   register: samba_admin_group_check
-#   changed_when: false
-#   failed_when: false
+- name: Check whether Linux administrators group exists
+  ansible.builtin.command:
+    cmd: samba-tool group show {{ samba_admin_group }}
+  register: samba_admin_group_check
+  changed_when: false
+  failed_when: false
 
 - name: Create Linux administrators group
   ansible.builtin.command:
     cmd: samba-tool group add {{ samba_admin_group }}
   when: samba_admin_group_check.rc != 0
 
-# - name: Check share user group memberships
-#   ansible.builtin.command:
-#     cmd: samba-tool group listmembers {{ item }}
-#   loop:
-#     - "{{ samba_share_group }}"
-#     - "{{ samba_admin_group }}"
-#   register: samba_group_members
-#   changed_when: false
+- name: Check share user group memberships
+  ansible.builtin.command:
+    cmd: samba-tool group listmembers {{ item }}
+  loop:
+    - "{{ samba_share_group }}"
+    - "{{ samba_admin_group }}"
+  register: samba_group_members
+  changed_when: false
 
 - name: Add share user to required groups
   ansible.builtin.command:
