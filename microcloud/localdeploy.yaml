@@ -78,14 +78,14 @@
         is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
       loop: "{{ virsh_dominfo.results }}"
 
-    - name: Stop when all requested VMs already exist
-      when: "true not in is_fresh_install_map.values() | list"
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "All requested VMs already exist in libvirt. Nothing to provision."
-        - name: End play
-          ansible.builtin.meta: end_play
+    # - name: Stop when all requested VMs already exist
+    #   when: "true not in is_fresh_install_map.values() | list"
+    #   block:
+    #     - name: Display already provisioned message
+    #       ansible.builtin.debug:
+    #         msg: "All requested VMs already exist in libvirt. Nothing to provision."
+    #     - name: End play
+    #       ansible.builtin.meta: end_play
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
@@ -221,6 +221,7 @@
       delay: 3
       changed_when: false
       loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
 
     - name: Add new VMs to dynamic inventory
       ansible.builtin.add_host:
