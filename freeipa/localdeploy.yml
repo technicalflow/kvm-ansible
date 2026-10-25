@@ -415,6 +415,7 @@
           - curl
           - wget
           - gnupg
+          - nfs-common
         state: present
       become: yes
 
@@ -464,6 +465,21 @@
     # =========================================================================
     # System Pre-requisites & Environment (from provision.sh)
     # =========================================================================
+    - name: Ensure mount point directory exists
+      ansible.builtin.file:
+        path: "/mnt/nfs"
+        state: directory
+        owner: root
+        group: root
+        mode: '755'
+
+    - name: Mount NFS share and add to /etc/fstab
+      ansible.posix.mount:
+        path: "/mnt/nfs"
+        src: "192.168.50.203:/data/Backup/router/certs"
+        fstype: "nfs4"
+        opts: "defaults"
+        state: mounted
 
     - name: Configure system locale in /etc/environment
       ansible.builtin.lineinfile:
