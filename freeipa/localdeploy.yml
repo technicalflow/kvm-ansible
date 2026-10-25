@@ -166,6 +166,7 @@
               <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
             </devices>
           </domain>
+      when: is_fresh_install
 
     - name: Configure VM autostart
       community.libvirt.virt:

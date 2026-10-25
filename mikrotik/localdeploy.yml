@@ -172,6 +172,7 @@
               <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
             </devices>
           </domain>
+      when: is_fresh_install
 
     - name: Configure CHR VM autostart
       community.libvirt.virt:
@@ -269,6 +270,10 @@
   hosts: chr_vms
   gather_facts: false
   tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Set router identity (hostname)
       community.routeros.command:
         commands:

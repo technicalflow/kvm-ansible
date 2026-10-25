@@ -173,6 +173,7 @@
             </devices>
           </domain>
       loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
 
     - name: Configure VM autostart
       community.libvirt.virt:

@@ -190,6 +190,7 @@
             </devices>
           </domain>
       loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
 
     - name: Configure VM autostart
       community.libvirt.virt:
@@ -413,6 +414,10 @@
   serial: 1
   gather_facts: false
   tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Upgrade all installed packages OS-agnostic way
       ansible.builtin.apt:
         name: "*"
