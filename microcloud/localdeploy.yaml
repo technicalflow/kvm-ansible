@@ -67,7 +67,7 @@
         mode: "0755"
 
     - name: Check if VM domains exist in libvirt
-      ansible.builtin.command: "virsh dominfo {{ item.vm_name }}"
+      ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item.vm_name }}"
       register: virsh_dominfo
       loop: "{{ vms }}"
       failed_when: false
@@ -77,6 +77,15 @@
       ansible.builtin.set_fact:
         is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
       loop: "{{ virsh_dominfo.results }}"
+
+    - name: Stop when all requested VMs already exist
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All requested VMs already exist in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
