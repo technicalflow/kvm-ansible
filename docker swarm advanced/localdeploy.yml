@@ -213,6 +213,7 @@
             </devices>
           </domain>
       loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
 
     - name: Configure VM autostart
       community.libvirt.virt:
@@ -230,7 +231,7 @@
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
       register: agent_ready
       until: agent_ready.rc == 0
-      retries: 10
+      retries: 20
       delay: 3
       changed_when: false
       become: false

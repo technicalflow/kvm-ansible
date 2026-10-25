@@ -168,6 +168,7 @@
               <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
             </devices>
           </domain>
+      when: is_fresh_install
 
     - name: Configure VM autostart
       community.libvirt.virt:
@@ -332,11 +333,6 @@
 - name: Configure static IP using systemd-networkd
   hosts: spawned_vms
   gather_facts: false
-  # vars:
-  #   static_ip: "192.168.50.248/23"
-  #   gateway_ip: "192.168.50.250"
-  #   dns_servers:
-  #     - "192.168.50.250"
   tasks:
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
@@ -356,74 +352,6 @@
         group: root
         mode: "0755"
       become: yes
-
-    # -------------------------------------------------------------------------
-    # Disable ifup / ifupdown on Debian
-    # -------------------------------------------------------------------------
-    # - name: Stop, disable, and mask ifupdown networking service (Debian)
-    #   ansible.builtin.systemd:
-    #     name: "{{ item }}"
-    #     state: stopped
-    #     enabled: false
-    #     masked: true
-    #   loop:
-    #     - networking
-    #     - ifup@eth*
-    #   when: ansible_os_family == 'Debian'
-    #   failed_when: false
-    #   become: yes
-
-    # - name: Neutralize /etc/network/interfaces to loopback only and turn off ifupdown (Debian)
-    #   ansible.builtin.copy:
-    #     dest: /etc/network/interfaces
-    #     content: |
-    #       # Managed by Ansible - physical interfaces handled by systemd-networkd
-    #       auto lo
-    #       iface lo inet loopback
-    #     owner: root
-    #     group: root
-    #     mode: "0644"
-    #   when: ansible_os_family == 'Debian'
-    #   become: yes
-
-    # - name: Remove any interface snippets in /etc/network/interfaces.d
-    #   ansible.builtin.file:
-    #     path: /etc/network/interfaces.d
-    #     state: absent
-    #   when: ansible_os_family == 'Debian'
-    #   become: yes
-
-    # - name: Ensure clean /etc/network/interfaces.d directory exists
-    #   ansible.builtin.file:
-    #     path: /etc/network/interfaces.d
-    #     state: directory
-    #     owner: root
-    #     group: root
-    #     mode: "0755"
-    #   when: ansible_os_family == 'Debian'
-    #   become: yes
-
-    # - name: Disable cloud-init network configuration
-    #   ansible.builtin.copy:
-    #     dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-    #     content: |
-    #       network: {config: disabled}
-    #     owner: root
-    #     group: root
-    #     mode: "0644"
-    #   when: ansible_os_family == 'Debian'
-    #   failed_when: false
-    #   become: yes
-
-    # - name: Remove conflicting netplan default configurations if present
-    #   ansible.builtin.file:
-    #     path: "{{ item }}"
-    #     state: absent
-    #   loop:
-    #     - /etc/netplan/50-cloud-init.yaml
-    #     - /etc/netplan/00-installer-config.yaml
-    #   failed_when: false
-    #   become: yes
 
     - name: Configure static IP in systemd-networkd
       ansible.builtin.copy:
@@ -454,43 +382,6 @@
         name: systemd-networkd
         state: restarted
       become: true
-
-    # - name: Ensure systemd-networkd is unmasked, enabled and started
-    #   ansible.builtin.systemd:
-    #     name: systemd-networkd
-    #     enabled: yes
-    #     masked: no
-    #     state: started
-    #   become: yes
-
-    # - name: Ensure systemd-resolved is installed (Debian/Ubuntu)
-    #   ansible.builtin.package:
-    #     name: systemd-resolved
-    #     state: present
-    #   when: ansible_os_family == 'Debian'
-    #   failed_when: false
-    #   become: yes
-    #   run_once: true
-
-    # - name: Ensure systemd-resolved is enabled and started
-    #   ansible.builtin.systemd:
-    #     name: systemd-resolved
-    #     enabled: yes
-    #     state: started
-    #   failed_when: false
-    #   ignore_errors: true
-    #   become: yes
-
-    # - name: Ensure /etc/resolv.conf is symlinked to systemd-resolved stub
-    #   ansible.builtin.file:
-    #     src: /run/systemd/resolve/stub-resolv.conf
-    #     dest: /etc/resolv.conf
-    #     state: link
-    #     force: yes
-    #   when: ansible_os_family == 'Debian'
-    #   failed_when: false
-    #   become: yes
-    #   run_once: true
 
     - name: Display VM Hostname and IP address summary
       ansible.builtin.debug:
@@ -540,16 +431,6 @@
         sleep: 5
         timeout: 30
 
-    # - name: Reboot VM to apply network changes
-    #   ansible.builtin.reboot:
-    #     reboot_timeout: 60
-    #     connect_timeout: 90
-    #     pre_reboot_delay: 3
-    #     post_reboot_delay: 20
-    #     test_command: uptime
-    #   become: true
-
-
 - name: Install and configure UniFi OS Server
   hosts: spawned_vms
   become: true
@@ -561,6 +442,10 @@
     uos_webui_port: "8443"
 
   tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Install required packages
       ansible.builtin.apt:
         name:

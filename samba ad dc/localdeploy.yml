@@ -147,6 +147,7 @@
               <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
             </devices>
           </domain>
+      when: is_fresh_install
 
     - name: Configure VM autostart
       community.libvirt.virt:
@@ -471,6 +472,10 @@
         state: restarted
 
   tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Check if Samba domain is already provisioned
       ansible.builtin.stat:
         path: /var/lib/samba/private/sam.ldb
