@@ -1,0 +1,451 @@
+---
+- name: Deploy KVM VM using local FreeBSD image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "msklafb14test01"
+    vm_memory_kb: 2097152 # 2048 MB
+    vm_vcpus: 4
+    disk_size: "32G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    ssh_priv_key_file: "/home/madmin/.ssh/ansible"
+    vm_autostart: false
+    static_ip: "192.168.50.132/23"
+    gateway_ip: "192.168.50.250"
+    # dns_servers:
+    #   - "192.168.50.242"
+    #   - "192.168.50.250"
+    ipv6_addr: "inet6 fd50:cafe::132 prefixlen 64"
+    ipv6_gateway: "fd50:cafe::250"
+    interface: "vtnet0"
+    network: "{{ static_ip | ansible.utils.ipaddr('network/prefix') }}"
+    network6: "{{ (ipv6_addr | regex_replace('^inet6\\s+', '') | regex_replace('\\s+prefixlen\\s+', '/')) | ansible.utils.ipaddr('network/prefix') }}"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/freebsd14.qcow2"
+    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  # vars_prompt:
+  #   - name: root_password
+  #     prompt: "SSH password for root"
+  #     private: true
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - sshpass
+          - python3-passlib
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure required packages are installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - sshpass
+          - python3-passlib
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /nvme/vms
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Define VM XML configuration with Qemu Agent channel enabled
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <vmport state="off"/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <interface type='bridge'>
+                <source bridge='br0'/>
+                <model type='virtio'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <!-- QEMU Guest Agent Channel -->
+              <channel type='unix'>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+            </devices>
+          </domain>
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart }}"
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Wait for QEMU Guest Agent to respond
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - -c
+          - qemu:///system
+          - qemu-agent-command
+          - "{{ vm_name }}"
+          - '{"execute":"guest-ping"}'
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    # - name: Wait for QEMU Guest Agent to respond
+    #   ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+    #   register: agent_ready
+    #   until: agent_ready.rc == 0 and (agent_ready.stdout | from_json).get('return') == {}
+    #   retries: 20
+    #   delay: 3
+    #   changed_when: false
+    #   become: false
+
+    - name: Wait for VM to get an IP address via guest agent
+      shell: |
+        virsh -q domifaddr "{{ vm_name }}" --source agent | grep net | grep ipv4 | awk '{print $4}' | cut -d/ -f1
+      register: vm_ip
+      until: vm_ip.stdout != ""
+      retries: 10
+      delay: 3
+
+    - name: Add new VM to dynamic inventory
+      ansible.builtin.add_host:
+        name: "{{ vm_ip.stdout }}"
+        groups: spawned_vms
+        vm_name: "{{ vm_name }}"
+        ansible_user: "root"
+        ansible_host: "{{ vm_ip.stdout }}"
+        ansible_connection: ssh
+        ansible_password: "freebsd"
+        admin_user: "{{ admin_user }}"
+        ansible_python_interpreter: /usr/local/bin/python3
+        # ansible_ssh_private_key_file: "{{ ssh_pub_key_file | regex_replace('\\.pub$', '') }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        ipv6_addr: "{{ ipv6_addr }}"
+        ipv6_gateway: "{{ ipv6_gateway }}"
+        gateway_ip: "{{ gateway_ip }}"
+        network: "{{ network }}"
+        network6: "{{ network6 }}"
+
+- name: Provision the spawned VM
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Wait for VM to become reachable via SSH
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 60
+
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: wheel
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/sh
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+        # password: "openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 | sudo pw usermod {{ admin_user }} -h 0"
+      register: admin_user_result
+      become: yes
+
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        mode: "0700"
+      become: yes
+
+    - name: Chown admin user home directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: "0755"
+      become: yes
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+      become: yes
+
+    # - name: Configure passwordless doas for admin user
+    #   ansible.builtin.copy:
+    #     dest: /usr/local/etc/doas.conf
+    #     content: |
+    #       permit nopass keepenv {{ admin_user }} as root
+    #     owner: root
+    #     group: wheel
+    #     mode: "0600"
+    #   become: yes
+
+- name: Configure static IP using FreeBSD rc.conf
+  hosts: spawned_vms
+  gather_facts: true
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Configure network and hostname in FreeBSD rc.conf
+      community.general.sysrc:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+      loop:
+        - { key: "hostname", value: "{{ vm_name }}" }
+        - { key: "ifconfig_vtnet0", value: "inet {{ static_ip }}" }
+        - { key: "defaultrouter", value: "{{ gateway_ip }}" }
+        - { key: "ipv6_activate_all_interfaces", value: "YES" }
+        - { key: "ifconfig_vtnet0_ipv6", value: "{{ ipv6_addr }}" }
+        - { key: "ipv6_defaultrouter", value: "{{ ipv6_gateway }}" }
+      become: yes
+
+    - name: Remove existing interface configuration from FreeBSD rc.conf
+      community.general.sysrc:
+        name: ifconfig_DEFAULT
+        state: absent
+      become: yes
+
+    # - name: Configure DNS resolvers
+    #   ansible.builtin.copy:
+    #     dest: /etc/resolv.conf
+    #     content: |
+    #       {% for dns in dns_servers %}
+    #       nameserver {{ dns }}
+    #       {% endfor %}
+    #     owner: root
+    #     group: wheel
+    #     mode: "0644"
+    #   become: yes
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ ansible_facts['hostname'] }}"
+          - " Configured IP: {{ static_ip }}"
+          - " IPv4 Address: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+          - "=========================================="
+
+- name: Install packages and reboot
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Upgrade all installed packages OS-agnostic way
+      ansible.builtin.pkgng:
+        name: "*"
+        state: latest
+      # become: yes (Not needed: Agent connection is already root-privileged)
+
+    - name: Ensure baseline tools are installed
+      ansible.builtin.pkgng:
+        name:
+          - mc
+          - htop
+          - vim
+          - git
+          - curl
+        state: present
+      become: true
+
+- name: Remove root password and lock root account
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Generate random root password
+      ansible.builtin.set_fact:
+        root_random_password: "{{ lookup('ansible.builtin.password', '/dev/null length=50 chars=ascii_letters,digits') }}"
+      no_log: true
+
+    - name: Set random root password
+      ansible.builtin.user:
+        name: root
+        password: "{{ root_random_password | password_hash('sha512') }}"
+        update_password: always
+      when: admin_user_result is succeeded
+      become: true
+      no_log: true
+
+    - name: Lock root account
+      ansible.builtin.command: pw lock root
+      when: admin_user_result is succeeded
+      become: true
+      changed_when: true
+
+    - name: Remove PermitRootLogin yes from OpenSSH configuration
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*PermitRootLogin\s+yes\s*$'
+        state: absent
+      become: true
+
+    - name: Start reboot over the current DHCP connection
+      ansible.builtin.command: /sbin/reboot
+      async: 1
+      poll: 0
+      become: true
+
+    - name: Change inventory connection to admin user for future plays
+      ansible.builtin.set_fact:
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        ansible_host: "{{ static_ip.split('/')[0] }}"
+        ansible_user: "{{ admin_user }}"
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_connection: ssh
+        ansible_python_interpreter: /usr/local/bin/python3
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        name: "{{ vm_ip.stdout }}"
+        vm_name: "{{ vm_name }}"
+        is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
+        network: "{{ network }}"
+        network6: "{{ network6 }}"
+        interface: "{{ interface }}"
+
+    # - name: Update Ansible connection address for static network
+    #   ansible.builtin.set_fact:
+    #     ansible_host: "{{ static_ip.split('/')[0] }}"
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 30
+
+- name: Run Unbound DNS server provisioning playbook
+  hosts: spawned_vms
+  gather_facts: false
+  import_playbook: unbound.yml
+  when: is_fresh_install
+  vars:
+    network: "{{ network }}"
+    network6: "{{ network6 }}"
+    interface: "{{ interface }}"
+# ansible-galaxy collection install community.libvirt ansible.posix community.general

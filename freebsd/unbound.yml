@@ -1,0 +1,239 @@
+---
+# Usage: ansible-playbook -i <vm_ip>, -u root unbound.yml
+# Requires: ansible-galaxy collection install community.general
+- name: Configure Unbound DNS server on FreeBSD 14
+  hosts: all
+  gather_facts: false
+  vars:
+    timezone: "Europe/Warsaw"
+    ntp_pools:
+      - "0.pl.pool.ntp.org"
+      - "1.pl.pool.ntp.org"
+    domain: "home.lab"
+    ssl_dir: /usr/local/etc/ssl
+    unbound_dir: /usr/local/etc/unbound
+
+  tasks:
+    - name: Install packages
+      community.general.pkgng:
+        name: [unbound, curl, openssl, nghttp2]
+        state: present
+
+    # Time
+    - name: Set timezone
+      ansible.builtin.copy:
+        src: "/usr/share/zoneinfo/{{ timezone }}"
+        dest: /etc/localtime
+        remote_src: true
+        mode: "0644"
+
+    - name: Add NTP servers
+      ansible.builtin.lineinfile:
+        path: /etc/ntp.conf
+        line: "server {{ item }} iburst prefer"
+        insertbefore: BOF
+      loop: "{{ ntp_pools }}"
+      notify: Restart ntpd
+
+    - name: Enable ntpd
+      community.general.sysrc:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+      loop:
+        - { key: ntpd_enable, value: "YES" }
+        - { key: ntpd_sync_on_start, value: "YES" }
+      notify: Restart ntpd
+
+    # TLS certificates (created once)
+    - name: Create SSL directory
+      ansible.builtin.file:
+        path: "{{ ssl_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Generate CA and server certificate
+      ansible.builtin.shell: |
+        openssl genrsa -out myCA.key 2048
+        openssl req -x509 -new -nodes -key myCA.key -sha256 -days 1825 -subj '/CN={{ domain }} CA' -out myCA.pem
+        openssl req -new -newkey rsa:2048 -nodes -keyout mydomain.key -subj '/CN={{ domain }}' -out mydomain.csr
+        openssl x509 -req -in mydomain.csr -CA myCA.pem -CAkey myCA.key -CAcreateserial -out mydomain.pem -days 1825 -sha256
+        chmod 600 myCA.key mydomain.key
+        chmod 644 myCA.pem mydomain.pem
+      args:
+        chdir: "{{ ssl_dir }}"
+        creates: "{{ ssl_dir }}/mydomain.pem"
+      notify: Restart unbound
+
+    # Unbound
+    - name: Download root hints
+      ansible.builtin.get_url:
+        url: https://www.internic.net/domain/named.cache
+        dest: "{{ unbound_dir }}/root.hints"
+        mode: "0644"
+
+    - name: Initialize DNSSEC trust anchor
+      ansible.builtin.command: /usr/local/sbin/unbound-anchor -a {{ unbound_dir }}/root.key
+      args:
+        creates: "{{ unbound_dir }}/root.key"
+      failed_when: false
+
+    - name: Set trust anchor ownership
+      ansible.builtin.file:
+        path: "{{ unbound_dir }}/root.key"
+        owner: unbound
+        group: unbound
+
+    - name: Configure Unbound
+      ansible.builtin.copy:
+        dest: "{{ unbound_dir }}/unbound.conf"
+        backup: true
+        validate: /usr/local/sbin/unbound-checkconf %s
+        content: |
+          server:
+                  verbosity: 1
+                  log-queries: yes
+                  num-threads: 2
+                  num-queries-per-thread: 1024
+                  interface: 0.0.0.0
+                  interface: ::0
+                  interface: 0.0.0.0@443
+                  interface: ::0@443
+                  port: 53
+                  https-port: 443
+                  do-ip4: yes
+                  do-ip6: yes
+                  do-udp: yes
+                  do-tcp: yes
+                  so-sndbuf: 0
+                  so-rcvbuf: 0
+                  msg-cache-size: 32m
+                  rrset-cache-size: 64m
+                  prefetch: yes
+                  prefetch-key: yes
+                  serve-expired: yes
+                  hide-identity: yes
+                  hide-version: yes
+                  access-control: {{ network }} allow
+                  access-control: 127.0.0.0/8 allow
+                  access-control: ::1 allow
+                  access-control: {{ network6 }} allow
+                  root-hints: "{{ unbound_dir }}/root.hints"
+                  auto-trust-anchor-file: "{{ unbound_dir }}/root.key"
+                  tls-service-key: "{{ ssl_dir }}/mydomain.key"
+                  tls-service-pem: "{{ ssl_dir }}/mydomain.pem"
+                  harden-dnssec-stripped: yes
+                  harden-glue: yes
+                  qname-minimisation: yes
+                  harden-referral-path: no
+                  log-time-ascii: yes
+                  private-domain: "{{ domain }}"
+                  local-zone: "{{ domain }}" static
+                  domain-insecure: "{{ domain }}"
+                  local-data: "sv-lambda. IN A 192.168.50.203"
+                  local-data: "privx.home.lab. IN A 192.168.50.230"
+                  local-data-ptr: "192.168.50.230 privx.home.lab"
+                  local-data-ptr: "192.168.50.203 sv-lambda"
+          remote-control:
+          # python:
+          # dynlib:
+          #forward-zone:
+          #        name: "."
+          #        forward-addr: 1.1.1.1
+          #        forward-addr: 9.9.9.9
+      notify: Restart unbound
+
+    # Network
+    # - name: Configure network settings in rc.conf
+    #   community.general.sysrc:
+    #     name: "{{ item.key }}"
+    #     value: "{{ item.value }}"
+    #   loop:
+    #     - { key: defaultrouter, value: "{{ gateway_ip }}" }
+    #     - { key: "ifconfig_{{ ext_if }}_ipv6", value: "{{ ipv6_addr }}" }
+    #     - { key: ipv6_defaultrouter, value: "{{ ipv6_gateway }}" }
+
+    # - name: Keep DHCP from changing the default gateway
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/dhclient.conf
+    #     line: "supersede routers {{ gateway_ip }};"
+    #     create: true
+
+    - name: Allow editing resolv.conf
+      ansible.builtin.command: chflags noschg /etc/resolv.conf
+      failed_when: false
+      changed_when: false
+
+    - name: Use local Unbound as resolver
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 127.0.0.1\n"
+        mode: "0644"
+
+    - name: Lock resolv.conf
+      ansible.builtin.command: chflags schg /etc/resolv.conf
+      changed_when: false
+
+    - name: Enable Unbound service
+      community.general.sysrc:
+        name: "unbound_enable"
+        value: "YES"
+
+    - name: Start Unbound
+      ansible.builtin.service:
+        name: unbound
+        state: started
+
+    # Firewall
+    - name: Configure PF
+      ansible.builtin.copy:
+        dest: /etc/pf.conf
+        mode: "0644"
+        content: |
+          # Loopback (needed for Unbound on 127.0.0.1)
+          pass quick on lo0 all
+
+          # Outbound allowed, inbound on external interface blocked by default
+          pass out on {{ interface }} all
+          block in on {{ interface }} all
+
+          # ICMPv6 (neighbor discovery, ping)
+          pass quick on {{ interface }} inet6 proto ipv6-icmp all no state
+
+          # SSH from 192.168.0.0/16
+          pass in quick on {{ interface }} inet proto tcp from 192.168.0.0/16 to any port 22
+
+          # DNS / DoH (IPv4)
+          pass in quick on {{ interface }} inet proto udp from {{ network }} to any port 53
+          pass in quick on {{ interface }} inet proto tcp from {{ network }} to any port 53
+          pass in quick on {{ interface }} inet proto tcp from {{ network }} to any port 443
+
+          # DNS / DoH (IPv6)
+          pass in quick on {{ interface }} inet6 proto udp from {{ network6 }} to any port 53
+          pass in quick on {{ interface }} inet6 proto tcp from {{ network6 }} to any port 53
+          pass in quick on {{ interface }} inet6 proto tcp from {{ network6 }} to any port 443
+
+          # Uncomment for IPv6 SSH
+          # pass in quick on {{ interface }} inet6 proto tcp from 2001:db8::/32 to any port 22
+        validate: pfctl -nf %s
+      notify: Restart pf
+
+    - name: Enable PF service
+      community.general.sysrc:
+        name: "pf_enable"
+        value: "YES"
+
+  handlers:
+    - name: Restart ntpd
+      ansible.builtin.service:
+        name: ntpd
+        state: restarted
+
+    - name: Restart unbound
+      ansible.builtin.service:
+        name: unbound
+        state: restarted
+
+    - name: Restart pf
+      ansible.builtin.service:
+        name: pf
+        state: restarted
