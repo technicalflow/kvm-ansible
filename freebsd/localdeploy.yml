@@ -230,6 +230,7 @@
         ipv6_addr: "{{ ipv6_addr }}"
         ipv6_gateway: "{{ ipv6_gateway }}"
         gateway_ip: "{{ gateway_ip }}"
+        interface: "{{ interface }}"
         network: "{{ network }}"
         network6: "{{ network6 }}"
 
@@ -363,13 +364,13 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.pkgng:
         name:
-          - mc
           - htop
           - vim
           - git
           - curl
+          - wget
         state: present
-      become: true
+      # become: true
 
 - name: Remove root password and lock root account
   hosts: spawned_vms
@@ -434,8 +435,4 @@
 
 - name: Run Unbound DNS server provisioning playbook
   import_playbook: unbound.yml
-  vars:
-    network: "{{ network }}"
-    network6: "{{ network6 }}"
-    interface: "{{ interface }}"
 # ansible-galaxy collection install community.libvirt ansible.posix community.general

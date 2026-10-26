@@ -4,6 +4,7 @@
 - name: Configure Unbound DNS server on FreeBSD 14
   hosts: spawned_vms
   become: true
+  become_method: doas
   gather_facts: false
   vars:
     timezone: "Europe/Warsaw"
@@ -87,7 +88,7 @@
     - name: Configure Unbound
       ansible.builtin.copy:
         dest: "{{ unbound_dir }}/unbound.conf"
-        backup: true
+        backup: false
         validate: /usr/local/sbin/unbound-checkconf %s
         content: |
           server:
