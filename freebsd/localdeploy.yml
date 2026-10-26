@@ -13,14 +13,14 @@
     vm_autostart: false
     static_ip: "192.168.50.132/23"
     gateway_ip: "192.168.50.250"
-    # dns_servers:
-    #   - "192.168.50.242"
-    #   - "192.168.50.250"
+    dns_servers:
+      - "192.168.50.242"
+      - "192.168.50.250"
     ipv6_addr: "inet6 fd50:cafe::132 prefixlen 64"
     ipv6_gateway: "fd50:cafe::250"
     interface: "vtnet0"
-    network: "{{ static_ip | ansible.utils.ipaddr('network/prefix') }}"
-    network6: "{{ (ipv6_addr | regex_replace('^inet6\\s+', '') | regex_replace('\\s+prefixlen\\s+', '/')) | ansible.utils.ipaddr('network/prefix') }}"
+    network: "192.168.50.0/23"
+    network6: "fd50:cafe::/64"
 
     template_image_path: "/data/ISO/VMIMAGES/KVM/freebsd14.qcow2"
     disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
@@ -211,7 +211,7 @@
 
     - name: Add new VM to dynamic inventory
       ansible.builtin.add_host:
-        name: "{{ vm_ip.stdout }}"
+        name: "{{ vm_name }}"
         groups: spawned_vms
         vm_name: "{{ vm_name }}"
         ansible_user: "root"
@@ -222,6 +222,7 @@
         ansible_python_interpreter: /usr/local/bin/python3
         # ansible_ssh_private_key_file: "{{ ssh_pub_key_file | regex_replace('\\.pub$', '') }}"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        ssh_priv_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         is_fresh_install: "{{ is_fresh_install }}"
         static_ip: "{{ static_ip }}"
@@ -283,6 +284,7 @@
         state: present
         key: "{{ lookup('file', ssh_pub_key_file) }}"
       become: yes
+      no_log: true
 
     # - name: Configure passwordless doas for admin user
     #   ansible.builtin.copy:
@@ -419,15 +421,6 @@
         ansible_connection: ssh
         ansible_python_interpreter: /usr/local/bin/python3
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-        name: "{{ vm_ip.stdout }}"
-        vm_name: "{{ vm_name }}"
-        is_fresh_install: "{{ is_fresh_install }}"
-        static_ip: "{{ static_ip }}"
-        dns_servers: "{{ dns_servers }}"
-        gateway_ip: "{{ gateway_ip }}"
-        network: "{{ network }}"
-        network6: "{{ network6 }}"
-        interface: "{{ interface }}"
 
     # - name: Update Ansible connection address for static network
     #   ansible.builtin.set_fact:
@@ -440,10 +433,7 @@
         timeout: 30
 
 - name: Run Unbound DNS server provisioning playbook
-  hosts: spawned_vms
-  gather_facts: false
   import_playbook: unbound.yml
-  when: is_fresh_install
   vars:
     network: "{{ network }}"
     network6: "{{ network6 }}"

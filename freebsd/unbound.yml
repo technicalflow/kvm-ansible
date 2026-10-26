@@ -2,7 +2,8 @@
 # Usage: ansible-playbook -i <vm_ip>, -u root unbound.yml
 # Requires: ansible-galaxy collection install community.general
 - name: Configure Unbound DNS server on FreeBSD 14
-  hosts: all
+  hosts: spawned_vms
+  become: true
   gather_facts: false
   vars:
     timezone: "Europe/Warsaw"
