@@ -6,7 +6,7 @@
     vm_name: "msklafb14dnss01"
     vm_memory_kb: 1048576 # 1024 MB
     vm_vcpus: 2
-    disk_size: "8G"
+    disk_size: "32G"
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     ssh_priv_key_file: "/home/madmin/.ssh/ansible"
@@ -201,13 +201,13 @@
     #   changed_when: false
     #   become: false
 
-    # - name: Wait for VM to get an IP address via guest agent
-    #   shell: |
-    #     virsh -q domifaddr "{{ vm_name }}" --source agent | grep net | grep ipv4 | awk '{print $4}' | cut -d/ -f1
-    #   register: vm_ip
-    #   until: vm_ip.stdout != ""
-    #   retries: 10
-    #   delay: 3
+    - name: Wait for VM to get an IP address via guest agent
+      shell: |
+        virsh -q domifaddr "{{ vm_name }}" --source agent | grep net | grep ipv4 | awk '{print $4}' | cut -d/ -f1
+      register: vm_ip
+      until: vm_ip.stdout != ""
+      retries: 10
+      delay: 3
 
     - name: Add new VM to dynamic inventory
       ansible.builtin.add_host:
