@@ -189,7 +189,7 @@
       register: agent_ready
       until: agent_ready.rc == 0
       retries: 20
-      delay: 3
+      delay: 5
       changed_when: false
 
     # - name: Wait for QEMU Guest Agent to respond
@@ -244,9 +244,9 @@
 
     - name: Wait for VM to become reachable via SSH
       ansible.builtin.wait_for_connection:
-        delay: 1
-        sleep: 5
-        timeout: 30
+        delay: 10
+        sleep: 3
+        timeout: 60
 
     - name: Ensure the user admin exists
       ansible.builtin.user:

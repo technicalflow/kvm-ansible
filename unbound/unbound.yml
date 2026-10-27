@@ -151,6 +151,16 @@
         name: unbound
         state: restarted
 
+    - name: Enable Unbound service
+      community.general.sysrc:
+        name: "unbound_enable"
+        value: "YES"
+
+    - name: Start Unbound
+      ansible.builtin.service:
+        name: unbound
+        state: started
+
     # Network
     # - name: Configure network settings in rc.conf
     #   community.general.sysrc:
@@ -181,16 +191,6 @@
     - name: Lock resolv.conf
       ansible.builtin.command: chflags schg /etc/resolv.conf
       changed_when: false
-
-    - name: Enable Unbound service
-      community.general.sysrc:
-        name: "unbound_enable"
-        value: "YES"
-
-    - name: Start Unbound
-      ansible.builtin.service:
-        name: unbound
-        state: started
 
     # Firewall
     - name: Configure PF
@@ -225,10 +225,6 @@
           # pass in quick on {{ interface }} inet6 proto tcp from 2001:db8::/32 to any port 22
         validate: pfctl -nf %s
 
-    - name: Restart pf
-      ansible.builtin.command: pfctl -f /etc/pf.conf
-      changed_when: true
-
     - name: Enable PF service
       community.general.sysrc:
         name: "pf_enable"
@@ -238,6 +234,10 @@
       ansible.builtin.service:
         name: pf
         state: started
+
+    - name: Restart pf
+      ansible.builtin.command: pfctl -f /etc/pf.conf
+      changed_when: true
 
   # handlers:
     # - name: Restart ntpd
