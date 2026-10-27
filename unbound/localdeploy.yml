@@ -3,20 +3,20 @@
   hosts: localhost
   become: true
   vars:
-    vm_name: "msklafb14test01"
-    vm_memory_kb: 2097152 # 2048 MB
-    vm_vcpus: 4
-    disk_size: "32G"
+    vm_name: "msklafb14dnss01"
+    vm_memory_kb: 1048576 # 1024 MB
+    vm_vcpus: 2
+    disk_size: "8G"
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     ssh_priv_key_file: "/home/madmin/.ssh/ansible"
     vm_autostart: false
-    static_ip: "192.168.50.132/23"
+    static_ip: "192.168.50.242/23"
     gateway_ip: "192.168.50.250"
     dns_servers:
-      - "192.168.50.242"
       - "192.168.50.250"
-    ipv6_addr: "inet6 fd50:cafe::132 prefixlen 64"
+      - "192.168.50.243"
+    ipv6_addr: "inet6 fd50:cafe::242 prefixlen 64"
     ipv6_gateway: "fd50:cafe::250"
     interface: "vtnet0"
     network: "192.168.50.0/23"
@@ -201,13 +201,13 @@
     #   changed_when: false
     #   become: false
 
-    - name: Wait for VM to get an IP address via guest agent
-      shell: |
-        virsh -q domifaddr "{{ vm_name }}" --source agent | grep net | grep ipv4 | awk '{print $4}' | cut -d/ -f1
-      register: vm_ip
-      until: vm_ip.stdout != ""
-      retries: 10
-      delay: 3
+    # - name: Wait for VM to get an IP address via guest agent
+    #   shell: |
+    #     virsh -q domifaddr "{{ vm_name }}" --source agent | grep net | grep ipv4 | awk '{print $4}' | cut -d/ -f1
+    #   register: vm_ip
+    #   until: vm_ip.stdout != ""
+    #   retries: 10
+    #   delay: 3
 
     - name: Add new VM to dynamic inventory
       ansible.builtin.add_host:
@@ -244,9 +244,9 @@
 
     - name: Wait for VM to become reachable via SSH
       ansible.builtin.wait_for_connection:
-        delay: 5
+        delay: 1
         sleep: 5
-        timeout: 60
+        timeout: 30
 
     - name: Ensure the user admin exists
       ansible.builtin.user:
@@ -260,7 +260,7 @@
         password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
         # password: "openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 | sudo pw usermod {{ admin_user }} -h 0"
       register: admin_user_result
-      become: yes
+      # become: yes
 
     - name: Create ssh directory
       ansible.builtin.file:
@@ -268,7 +268,7 @@
         state: directory
         owner: "{{ admin_user }}"
         mode: "0700"
-      become: yes
+      # become: yes
 
     - name: Chown admin user home directory
       ansible.builtin.file:
@@ -277,14 +277,14 @@
         owner: "{{ admin_user }}"
         group: "{{ admin_user }}"
         mode: "0755"
-      become: yes
+      # become: yes
 
     - name: Add SSH public key for admin user
       ansible.posix.authorized_key:
         user: "{{ admin_user }}"
         state: present
         key: "{{ lookup('file', ssh_pub_key_file) }}"
-      become: yes
+      # become: yes
       no_log: true
 
     # - name: Configure passwordless doas for admin user
@@ -325,17 +325,17 @@
         state: absent
       become: yes
 
-    # - name: Configure DNS resolvers
-    #   ansible.builtin.copy:
-    #     dest: /etc/resolv.conf
-    #     content: |
-    #       {% for dns in dns_servers %}
-    #       nameserver {{ dns }}
-    #       {% endfor %}
-    #     owner: root
-    #     group: wheel
-    #     mode: "0644"
-    #   become: yes
+    - name: Configure DNS resolvers
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: |
+          {% for dns in dns_servers %}
+          nameserver {{ dns }}
+          {% endfor %}
+        owner: root
+        group: wheel
+        mode: "0644"
+      # become: yes
 
     - name: Display VM Hostname and IP address summary
       ansible.builtin.debug:
@@ -347,7 +347,7 @@
           - " IPv4 Address: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
           - "=========================================="
 
-- name: Install packages and reboot
+- name: Install packages
   hosts: spawned_vms
   gather_facts: false
   tasks:
@@ -369,6 +369,7 @@
           - git
           - curl
           - wget
+          - bash
         state: present
       # become: true
 
@@ -391,13 +392,13 @@
         password: "{{ root_random_password | password_hash('sha512') }}"
         update_password: always
       when: admin_user_result is succeeded
-      become: true
+      # become: true
       no_log: true
 
     - name: Lock root account
       ansible.builtin.command: pw lock root
       when: admin_user_result is succeeded
-      become: true
+      # become: true
       changed_when: true
 
     - name: Remove PermitRootLogin yes from OpenSSH configuration
@@ -405,13 +406,13 @@
         path: /etc/ssh/sshd_config
         regexp: '^\s*PermitRootLogin\s+yes\s*$'
         state: absent
-      become: true
+      # become: true
 
     - name: Start reboot over the current DHCP connection
       ansible.builtin.command: /sbin/reboot
       async: 1
       poll: 0
-      become: true
+      # become: true
 
     - name: Change inventory connection to admin user for future plays
       ansible.builtin.set_fact:

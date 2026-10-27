@@ -35,7 +35,7 @@
         line: "server {{ item }} iburst prefer"
         insertbefore: BOF
       loop: "{{ ntp_pools }}"
-      notify: Restart ntpd
+      # notify: Restart ntpd
 
     - name: Enable ntpd
       community.general.sysrc:
@@ -44,7 +44,12 @@
       loop:
         - { key: ntpd_enable, value: "YES" }
         - { key: ntpd_sync_on_start, value: "YES" }
-      notify: Restart ntpd
+      # notify: Restart ntpd
+
+    - name: Restart ntpd
+      ansible.builtin.service:
+        name: ntpd
+        state: restarted
 
     # TLS certificates (created once)
     - name: Create SSL directory
@@ -64,7 +69,7 @@
       args:
         chdir: "{{ ssl_dir }}"
         creates: "{{ ssl_dir }}/mydomain.pem"
-      notify: Restart unbound
+      # notify: Restart unbound
 
     # Unbound
     - name: Download root hints
@@ -140,7 +145,11 @@
           #        name: "."
           #        forward-addr: 1.1.1.1
           #        forward-addr: 9.9.9.9
-      notify: Restart unbound
+
+    - name: Restart unbound
+      ansible.builtin.service:
+        name: unbound
+        state: restarted
 
     # Network
     # - name: Configure network settings in rc.conf
@@ -215,7 +224,10 @@
           # Uncomment for IPv6 SSH
           # pass in quick on {{ interface }} inet6 proto tcp from 2001:db8::/32 to any port 22
         validate: pfctl -nf %s
-      notify: Restart pf
+
+    - name: Restart pf
+      ansible.builtin.command: pfctl -f /etc/pf.conf
+      changed_when: true
 
     - name: Enable PF service
       community.general.sysrc:
@@ -227,17 +239,13 @@
         name: pf
         state: started
 
-  handlers:
-    - name: Restart ntpd
-      ansible.builtin.service:
-        name: ntpd
-        state: restarted
+  # handlers:
+    # - name: Restart ntpd
+    #   ansible.builtin.service:
+    #     name: ntpd
+    #     state: restarted
 
-    - name: Restart unbound
-      ansible.builtin.service:
-        name: unbound
-        state: restarted
-
-    - name: Restart pf
-      ansible.builtin.command: pfctl -f /etc/pf.conf
-      changed_when: true
+    # - name: Restart unbound
+    #   ansible.builtin.service:
+    #     name: unbound
+    #     state: restarted
