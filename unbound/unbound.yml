@@ -132,8 +132,6 @@
                   local-zone: "{{ domain }}" static
                   domain-insecure: "{{ domain }}"
                   local-data: "sv-lambda. IN A 192.168.50.203"
-                  local-data: "privx.home.lab. IN A 192.168.50.230"
-                  local-data-ptr: "192.168.50.230 privx.home.lab"
                   local-data-ptr: "192.168.50.203 sv-lambda"
           remote-control:
           # python:
@@ -224,6 +222,11 @@
         name: "pf_enable"
         value: "YES"
 
+    - name: Ensure PF is running
+      ansible.builtin.service:
+        name: pf
+        state: started
+
   handlers:
     - name: Restart ntpd
       ansible.builtin.service:
@@ -236,6 +239,5 @@
         state: restarted
 
     - name: Restart pf
-      ansible.builtin.service:
-        name: pf
-        state: restarted
+      ansible.builtin.command: pfctl -f /etc/pf.conf
+      changed_when: true
