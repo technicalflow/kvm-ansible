@@ -491,7 +491,7 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 15
+        delay: 10
         sleep: 5
         timeout: 60
 # Required collections on Ansible control node:

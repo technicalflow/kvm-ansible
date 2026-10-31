@@ -12,7 +12,7 @@
     vm_name_prefix: "mskladb13dswm"
 
     # Baseline IP — last octet will be incremented per node (node01 → .101, node02 → .102, …)
-    vm_ip_base: "192.168.51.220"
+    vm_ip_base: "192.168.50.180"
     vm_ip_subnet: "/23"
 
     # Managers VM resources

@@ -178,10 +178,9 @@
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
       register: agent_ready
       until: agent_ready.rc == 0
-      retries: 10
+      retries: 25
       delay: 3
       changed_when: false
-      become: false
       loop: "{{ vms }}"
 
     - name: Add new VMs to dynamic inventory
@@ -215,7 +214,7 @@
   tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 5
         sleep: 5
         timeout: 60
 
@@ -297,7 +296,6 @@
         shell: /bin/bash
         update_password: on_create
         password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
-      become: yes
 
     - name: Create ssh directory
       ansible.builtin.file:
@@ -306,21 +304,18 @@
         owner: "{{ admin_user }}"
         group: users
         mode: "0700"
-      become: yes
 
     - name: Add SSH public key for admin user
       ansible.posix.authorized_key:
         user: "{{ admin_user }}"
         state: present
         key: "{{ lookup('file', ssh_pub_key_file) }}"
-      become: yes
 
     # - name: Remove default cloud users if they exist
     #   ansible.builtin.user:
     #     name: "{{ item }}"
     #     state: absent
     #     remove: yes
-    #   become: yes
     #   loop:
     #     - ubuntu
     #     - debian
@@ -332,7 +327,6 @@
         content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
         mode: "0440"
         validate: /usr/sbin/visudo -cf %s
-      become: yes
 
 - name: Configure static IP
   hosts: spawned_vms
@@ -424,21 +418,18 @@
           - gnupg
           - firewalld
         state: present
-      become: yes
 
     - name: Enable and start firewalld
       ansible.builtin.systemd:
         name: firewalld
         enabled: true
         state: started
-      become: yes
 
     - name: Reboot VM to apply changes
       ansible.builtin.command: systemctl reboot
       async: 1
       poll: 0
       changed_when: true
-      become: true
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
