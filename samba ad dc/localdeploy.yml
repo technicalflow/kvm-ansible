@@ -1,5 +1,5 @@
 ---
-- name: Deploy KVM VM using local Debian image
+- name: Deploy Samba AD DC KVM VM using local Debian image
   hosts: localhost
   become: true
   vars:
@@ -443,15 +443,15 @@
     samba_network: "{{ ansible_facts['default_ipv4']['network'] }}/{{ static_ip.split('/')[-1] }}"
     samba_interface: "{{ ansible_facts['default_ipv4']['interface'] }}"
     samba_dns_forwarder: "9.9.9.9"
-    samba_admin_password: "{{ lookup('ansible.builtin.env', 'SAMBA_ADMIN_PASSWORD') | default('Password1000!!', true) }}"
+    samba_admin_password: "{{ lookup('ansible.builtin.env', 'SAMBA_ADMIN_PASSWORD') | default('Mandarynka1000!!', true) }}"
     samba_admin_user: "Administrator"
     samba_share_user: "dcadmin"
-    samba_share_user_password: "{{ lookup('ansible.builtin.env', 'SAMBA_SHARE_USER_PASSWORD') | default('Password2000!!', true) }}"
+    samba_share_user_password: "{{ lookup('ansible.builtin.env', 'SAMBA_SHARE_USER_PASSWORD') | default('Mandarynka2000!!', true) }}"
     samba_share_group: "datashare"
     samba_admin_group: "linux_admins"
     samba_share_path: "/data"
     samba_dns_server: "{{ samba_ip }}"
-    samba_reverse_zone: "200.168.192.in-addr.arpa"
+    samba_reverse_zone: "50.168.192.in-addr.arpa"
     samba_reverse_record: "1"
     samba_server_fqdn: "{{ samba_hostname }}.{{ samba_domain }}"
     samba_timezone: "Europe/Warsaw"

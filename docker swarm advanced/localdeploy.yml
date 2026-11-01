@@ -698,7 +698,7 @@
   tasks:
     - name: Write tokens file with all manager IPs
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/docker_swarm_tokens.yml"
+        dest: "{{ playbook_dir }}/jointoken.yml"
         content: |
           # Docker Swarm Cluster Tokens
           docker_swarm_manager_ips:

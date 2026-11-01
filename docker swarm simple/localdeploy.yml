@@ -6,11 +6,11 @@
     # List of 3 virtual machines to provision
     vms:
       - vm_name: "mskladb13dock01"
-        static_ip: "192.168.50.131/23"
+        static_ip: "192.168.50.166/23"
       - vm_name: "mskladb13dock02"
-        static_ip: "192.168.50.132/23"
+        static_ip: "192.168.50.167/23"
       - vm_name: "mskladb13dock03"
-        static_ip: "192.168.50.133/23"
+        static_ip: "192.168.50.168/23"
 
     vm_memory_kb: 1048576 # 1024 MB each
     vm_vcpus: 4
@@ -570,7 +570,7 @@
 
     - name: Save Docker Swarm tokens to secrets file
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/docker_swarm_tokens.yml"
+        dest: "{{ playbook_dir }}/jointoken.yml"
         content: |
           # Docker Swarm Cluster Tokens
           docker_swarm_manager_ip: "{{ node_ip }}"

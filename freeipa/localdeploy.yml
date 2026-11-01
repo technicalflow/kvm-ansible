@@ -452,9 +452,9 @@
     ipa_ip_address: "{{ (static_ip | default(ansible_default_ipv4.address | default(''))).split('/')[0] }}"
     ipa_dns_forwarder: "9.9.9.9"
     ipa_timezone: "Europe/Warsaw"
-    ipa_dir_manager_password: "simplepassword1"
+    ipa_dir_manager_password: "mandarynka"
     ipa_admin_principal: "admin"
-    ipa_admin_password: "simplepassword2"
+    ipa_admin_password: "mandarynka"
 
   tasks:
     - name: Preserve FreeIPA variables for provisioning

@@ -1,16 +1,16 @@
 ---
-- name: Deploy KVM VMs using local Debian image
+- name: Deploy MicroK8S KVM VMs using local Debian image
   hosts: localhost
   become: true
   vars:
     # List of 3 virtual machines to provision
     vms:
       - vm_name: "mskladb13mk8s01"
-        static_ip: "192.168.50.141/23"
+        static_ip: "192.168.50.176/23"
       - vm_name: "mskladb13mk8s02"
-        static_ip: "192.168.50.142/23"
+        static_ip: "192.168.50.177/23"
       - vm_name: "mskladb13mk8s03"
-        static_ip: "192.168.50.143/23"
+        static_ip: "192.168.50.178/23"
 
     vm_memory_kb: 2097152 # 2048 MB each
     vm_vcpus: 4
@@ -608,7 +608,7 @@
 
     - name: Save Microk8s token
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/microk8s.yml"
+        dest: "{{ playbook_dir }}/jointoken.yml"
         content: |
           # Microk8s Tokens
           manager_ip: "{{ node_ip }}"

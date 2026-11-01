@@ -1,5 +1,5 @@
 ---
-- name: Deploy KVM VM using local Debian image
+- name: Deploy Unifi OS KVM VM using local Debian image
   hosts: localhost
   become: true
   vars:

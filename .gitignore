@@ -1,0 +1,11 @@
+# git #
+!.gitkeep
+!.gitignore
+
+# macos #
+*.db
+._*
+.DS_*
+.Spotlight*
+.Trashes*
+*jointoken.yml
