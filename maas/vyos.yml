@@ -74,10 +74,14 @@
             <domain name='{{ libvirt_net_name }}' localOnly='yes'/>
           </network>
 
-    - name: Ensure libvirt network '{{ libvirt_net_name }}' is active and autostarted
+    - name: Ensure libvirt network is active and autostarted
       community.libvirt.virt_net:
         name: "{{ libvirt_net_name }}"
         state: active
+
+    - name: Configure libvirt NAT network autostart
+      community.libvirt.virt_net:
+        name: "{{ nat_network_name }}"
         autostart: true
 
     - name: Check if VM domain exists in libvirt

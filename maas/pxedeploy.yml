@@ -194,6 +194,10 @@
         autostart: "{{ vm_autostart }}"
       loop: "{{ vms }}"
 
+    - name: Pause for 10 seconds
+      ansible.builtin.pause:
+        seconds: 10
+
     - name: Ensure VMs are started (initiating PXE boot)
       community.libvirt.virt:
         name: "{{ item.vm_name }}"
