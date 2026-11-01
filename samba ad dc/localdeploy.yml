@@ -41,7 +41,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /data/vms
+        path: /data/VMS
         state: directory
         owner: root
         group: root

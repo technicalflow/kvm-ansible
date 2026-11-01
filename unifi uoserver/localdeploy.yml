@@ -393,7 +393,7 @@
       ansible.builtin.meta: end_host
       when: not is_fresh_install
 
-    - name: Upgrade all installed packages OS-agnostic way
+    - name: Upgrade all installed packages
       ansible.builtin.apt:
         name: "*"
         state: latest
@@ -402,13 +402,11 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.apt:
         name:
-          - mc
           - htop
           - curl
           - wget
           - gnupg
         state: present
-      become: yes
 
     - name: Reboot VM to apply network changes
       ansible.builtin.command: systemctl reboot

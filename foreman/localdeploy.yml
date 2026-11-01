@@ -4,7 +4,7 @@
   become: true
   vars:
     vm_name: "mskladb13fore01"
-    vm_memory_kb: 4194304 # 4096 MB
+    vm_memory_kb: 8388608 # 8192 MB
     vm_vcpus: 4
     disk_size: "32G"
     admin_user: "madmin"
@@ -185,7 +185,6 @@
       retries: 20
       delay: 3
       changed_when: false
-      become: false
 
     - name: Add new VM to dynamic inventory (via Out-of-band Channel)
       ansible.builtin.add_host:
@@ -306,7 +305,6 @@
     #     name: "{{ item }}"
     #     state: absent
     #     remove: yes
-    #   become: yes
     #   loop:
     #     - ubuntu
     #     - debian
@@ -402,20 +400,18 @@
           - gnupg
           - ca-certificates
         state: present
-      become: yes
 
     - name: Reboot VM to apply network changes
       ansible.builtin.command: systemctl reboot
       async: 1
       poll: 0
       changed_when: true
-      become: true
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
         delay: 10
         sleep: 5
-        timeout: 30
+        timeout: 60
 
 - name: Install Foreman
   hosts: spawned_vms
