@@ -1,0 +1,435 @@
+---
+- name: Deploy KVM VM using local VyOS image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "msklavy26netm02"
+    vm_memory_kb: 1048576 # 1024 MB
+    vm_vcpus: 2
+    disk_size: "8G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    ssh_priv_key_file: "/home/madmin/.ssh/ansible"
+    vm_autostart: false
+    timezone: "Europe/Warsaw"
+    wan_bridge: "br0"
+    wan_ip: "192.168.50.253/23"
+    lan_ip: "192.168.110.253/24"
+    lan_subnet: "192.168.110.0/24"
+    wan_address: "{{ wan_ip.split('/')[0] }}"
+    lan_address: "{{ lan_ip.split('/')[0] }}"
+    wan_gateway_ip: "192.168.50.250"
+    dns_servers:
+      - "1.1.1.1"
+      - "9.9.9.9"
+
+    # Libvirt network settings
+    libvirt_net_name: "maasnet01"
+    libvirt_net_bridge: "virbr-maas01"
+    libvirt_net_ip: "192.168.110.1"
+    libvirt_net_netmask: "255.255.255.0"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/vyos2026.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - sshpass
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure required packages are installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - sshpass
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /data/VMS
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Define isolated libvirt network
+      community.libvirt.virt_net:
+        command: define
+        name: "{{ libvirt_net_name }}"
+        xml: |
+          <network>
+            <name>{{ libvirt_net_name }}</name>
+            <forward mode='none'/>
+            <bridge name='{{ libvirt_net_bridge }}' stp='on' delay='0'/>
+            <domain name='{{ libvirt_net_name }}' localOnly='yes'/>
+          </network>
+
+    - name: Ensure libvirt network '{{ libvirt_net_name }}' is active and autostarted
+      community.libvirt.virt_net:
+        name: "{{ libvirt_net_name }}"
+        state: active
+        autostart: true
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Define VM XML configuration with Qemu Agent channel enabled
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <vmport state="off"/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <!-- eth0 (WAN) -->
+              <interface type='bridge'>
+                <source bridge='{{ wan_bridge }}'/>
+                <model type='virtio'/>
+              </interface>
+              <!-- ether1: MAAS network interface -->
+              <interface type='network'>
+                <source network='{{ libvirt_net_name }}'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <!-- QEMU Guest Agent Channel -->
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+      when: is_fresh_install
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart }}"
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 5
+      changed_when: false
+      become: false
+
+    - name: Wait for VM to get an IP address via guest agent
+      ansible.builtin.shell: |
+        virsh -q domifaddr "{{ vm_name }}" --source agent | grep eth | grep ipv4 | awk '{print $4}' | cut -d/ -f1
+      register: vm_ip
+      until: vm_ip.stdout != ""
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Add new VM to dynamic inventory (via Out-of-band Channel)
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: spawned_vyos_vms
+        vm_name: "{{ vm_name }}"
+        # ansible_connection: community.libvirt.libvirt_qemu
+        # ansible_libvirt_uri: "qemu:///system"
+        ansible_user: "vyos"
+        ansible_host: "{{ vm_ip.stdout }}"
+        ansible_connection: ssh
+        ansible_password: "vyos"
+        admin_user: "{{ admin_user }}"
+        ansible_python_interpreter: /usr/bin/python3
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        ssh_priv_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        is_fresh_install: "{{ is_fresh_install }}"
+        wan_ip: "{{ wan_ip }}"
+        wan_address: "{{ wan_address }}"
+        lan_ip: "{{ lan_ip }}"
+        lan_address: "{{ lan_address }}"
+        lan_subnet: "{{ lan_subnet }}"
+        dns_servers: "{{ dns_servers }}"
+        wan_gateway_ip: "{{ wan_gateway_ip }}"
+        timezone: "{{ timezone }}"
+
+# ansible-galaxy collection install community.libvirt vyos.vyos ansible.netcommon
+
+- name: Provision the spawned VM
+  hosts: spawned_vyos_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    # # VyOS root (/) is an overlay; the real disk is the live persistence partition
+    # - name: Expand persistence partition and filesystem
+    #   ansible.builtin.shell: |
+    #     PART=$(findmnt -n -o SOURCE /usr/lib/live/mount/persistence)
+    #     DEV=$(echo "$PART" | sed 's/p\?[0-9]*$//')
+    #     NUM=$(echo "$PART" | grep -o '[0-9]*$')
+    #     growpart "$DEV" "$NUM"
+    #     resize2fs "$PART"
+    #   args:
+    #     executable: /bin/bash
+    #   register: growpart_result
+    #   changed_when: "'CHANGED' in growpart_result.stdout"
+    #   become: true
+
+- name: Configure VyOS
+  hosts: spawned_vyos_vms
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: vyos.vyos.vyos
+    ansible_user: "vyos"
+    ansible_password: "vyos"
+    # network_cli (paramiko/libssh) ignores ansible_ssh_common_args
+    ansible_host_key_checking: false
+    pub_key: "{{ lookup('file', ssh_pub_key_file).split() }}"
+
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: System settings and static WAN address (DHCP address kept for now)
+      no_log: true
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          # - set interfaces ethernet eth0 address {{ wan_ip }}
+          # - set protocols static route 0.0.0.0/0 next-hop {{ wan_gateway_ip }}
+          - set system host-name {{ vm_name }}
+          - set system time-zone {{ timezone }}
+          - set service ntp server 0.pl.pool.ntp.org pool
+          - set service ntp server 1.pl.pool.ntp.org pool
+          - set system syslog local facility all level info
+          - set system login user {{ admin_user }} authentication public-keys ansible type {{ pub_key[0] }}
+          - set system login user {{ admin_user }} authentication public-keys ansible key {{ pub_key[1] }}
+          - set system name-server {{ dns_servers[0] }}
+          - set system name-server {{ dns_servers[1] }}
+
+    - name: Interface addresses
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set interfaces ethernet eth0 address {{ wan_ip }}
+          - set protocols static route 0.0.0.0/0 next-hop {{ wan_gateway_ip }}
+          # - set interfaces ethernet eth0 address fd50:cafe::253/64
+          - set interfaces ethernet eth0 description WAN
+          - set interfaces ethernet eth1 address {{ lan_ip }}
+          - set interfaces ethernet eth1 description LAN
+
+    - name: Switch connection to static WAN address
+      ansible.builtin.set_fact:
+        ansible_host: "{{ wan_address }}"
+
+    - name: Reset connection
+      ansible.builtin.meta: reset_connection
+
+    # - name: DHCP for LAN
+    #   vyos.vyos.vyos_config:
+    #     save: true
+    #     lines:
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} subnet-id 1
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} range 0 start 192.168.110.10
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} range 0 stop 192.168.110.100
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} lease 3600
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} option default-router {{ lan_address }}
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} option name-server {{ dns_servers[0] }}
+    #       - set service dhcp-server shared-network-name LAN subnet {{ lan_subnet }} option name-server {{ dns_servers[1] }}
+
+    - name: Masquerade LAN to WAN
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set nat source rule 100 source address {{ lan_subnet }}
+          - set nat source rule 100 outbound-interface name eth0
+          - set nat source rule 100 translation address masquerade
+
+    - name: SSH service
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set service ssh port 22
+          - set service ssh listen-address {{ wan_address }}
+          - set service ssh listen-address {{ lan_address }}
+
+    - name: Global options and groups
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          # state-policy is applied before all chain rules
+          - set firewall global-options all-ping enable
+          - set firewall global-options state-policy established action accept
+          - set firewall global-options state-policy related action accept
+          - set firewall global-options state-policy invalid action drop
+          - set firewall group network-group NET-WAN network 192.168.50.0/23
+          - set firewall group network-group NET-WAN network 192.168.52.0/24
+          - set firewall group network-group NET-LAN network {{ lan_subnet }}
+          # Firewall input
+          - set firewall ipv4 input filter default-action drop
+          - set firewall ipv4 input filter default-log
+          # ICMP echo-request
+          - set firewall ipv4 input filter rule 10 action accept
+          - set firewall ipv4 input filter rule 10 protocol icmp
+          - set firewall ipv4 input filter rule 10 icmp type-name echo-request
+          - set firewall ipv4 input filter rule 10 description 'Allow ping'
+          # DHCP server request from LAN
+          - set firewall ipv4 input filter rule 20 action accept
+          - set firewall ipv4 input filter rule 20 protocol udp
+          - set firewall ipv4 input filter rule 20 destination port 67
+          - set firewall ipv4 input filter rule 20 inbound-interface name eth1
+          - set firewall ipv4 input filter rule 20 description 'Allow DHCP from LAN'
+          # NetBIOS from WAN
+          - set firewall ipv4 input filter rule 30 action accept
+          - set firewall ipv4 input filter rule 30 protocol udp
+          - set firewall ipv4 input filter rule 30 destination port 137,138
+          - set firewall ipv4 input filter rule 30 inbound-interface name eth0
+          - set firewall ipv4 input filter rule 30 description 'Allow NetBIOS from WAN'
+          # SSH to WAN IP
+          - set firewall ipv4 input filter rule 40 action accept
+          - set firewall ipv4 input filter rule 40 protocol tcp
+          - set firewall ipv4 input filter rule 40 destination address {{ wan_address }}
+          - set firewall ipv4 input filter rule 40 destination port 22
+          - set firewall ipv4 input filter rule 40 inbound-interface name eth0
+          - set firewall ipv4 input filter rule 40 description 'Allow SSH from WAN'
+          # SSH from LAN
+          - set firewall ipv4 input filter rule 45 action accept
+          - set firewall ipv4 input filter rule 45 protocol tcp
+          - set firewall ipv4 input filter rule 45 destination port 22
+          - set firewall ipv4 input filter rule 45 inbound-interface name eth1
+          - set firewall ipv4 input filter rule 45 description 'Allow SSH from LAN'
+
+    - name: IPv4 forward filter
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set firewall ipv4 forward filter default-action drop
+          - set firewall ipv4 forward filter default-log
+          # Inbound from WAN subnets to LAN
+          - set firewall ipv4 forward filter rule 100 action accept
+          - set firewall ipv4 forward filter rule 100 inbound-interface name eth0
+          - set firewall ipv4 forward filter rule 100 outbound-interface name eth1
+          - set firewall ipv4 forward filter rule 100 source group network-group NET-WAN
+          - set firewall ipv4 forward filter rule 100 destination group network-group NET-LAN
+          - set firewall ipv4 forward filter rule 100 description 'Allow WAN subnets to LAN'
+          # Outbound from LAN to WAN
+          - set firewall ipv4 forward filter rule 110 action accept
+          - set firewall ipv4 forward filter rule 110 inbound-interface name eth1
+          - set firewall ipv4 forward filter rule 110 outbound-interface name eth0
+          - set firewall ipv4 forward filter rule 110 source group network-group NET-LAN
+          - set firewall ipv4 forward filter rule 110 description 'Allow LAN to   WAN'
+          # Output
+          - set firewall ipv4 output filter default-action accept
+
+    - name: IPv6 filters
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set firewall ipv6 input filter default-action drop
+          - set firewall ipv6 forward filter default-action drop
+          # ICMPv6 is required for neighbor discovery
+          - set firewall ipv6 input filter rule 10 action accept
+          - set firewall ipv6 input filter rule 10 protocol ipv6-icmp
+          - set firewall ipv6 input filter rule 10 description 'Allow ICMPv6 (ND, ping)'
+
+    # Last step: drop the temporary DHCP address (we are connected via the static IP)
+    - name: Remove DHCP address from eth0
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - delete interfaces ethernet eth0 address dhcp
+          - delete system login user vyos
+# <ip address='{{ lan_address }}' netmask='{{ libvirt_net_netmask }}'/>

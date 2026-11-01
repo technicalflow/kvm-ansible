@@ -1,0 +1,12 @@
+---
+- name: 1. Deploy and configure VyOS Router VM
+  ansible.builtin.import_playbook: vyosdeploy.yml
+
+- name: 2. Deploy and configure MAAS & Juju VM
+  ansible.builtin.import_playbook: maas.yml
+
+- name: 3. Onboard PXE VMs into MAAS with known MAC addresses
+  ansible.builtin.import_playbook: maasonboard.yml
+
+- name: 4. Deploy and start PXE KVM VMs
+  ansible.builtin.import_playbook: pxedeploy.yml

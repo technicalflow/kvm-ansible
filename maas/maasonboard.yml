@@ -1,0 +1,71 @@
+---
+- name: Prepare MAAS VM connection for onboarding PXE nodes
+  hosts: localhost
+  gather_facts: false
+  vars:
+    maas_vm_name: "msksidb13maas01"
+  tasks:
+    - name: Add MAAS VM to dynamic inventory
+      ansible.builtin.add_host:
+        name: "{{ maas_vm_name }}"
+        groups: spawned_maas_vms
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ maas_vm_name }}"
+        ansible_remote_tmp: "/tmp/.ansible/tmp"
+
+- name: Onboard PXE VMs into MAAS with known MAC addresses
+  hosts: spawned_maas_vms
+  gather_facts: false
+  vars:
+    maas_admin_user: "maasadmin"
+    maas_url: "http://192.168.110.210:5240/MAAS"
+    virsh_power_address: "qemu+ssh://maas@192.168.50.201/system"
+    virsh_power_user: "maas"
+    virsh_power_pass: "mandarynka"
+    vms:
+      - vm_name: "maaspxe1"
+        mac_address: "52:54:00:11:00:01"
+      - vm_name: "maaspxe2"
+        mac_address: "52:54:00:11:00:02"
+      - vm_name: "maaspxe3"
+        mac_address: "52:54:00:11:00:03"
+
+  tasks:
+    - name: Wait for MAAS API to be ready
+      ansible.builtin.uri:
+        url: "{{ maas_url }}/api/2.0/version/"
+        status_code: 200
+      register: maas_api_up
+      until: maas_api_up.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Retrieve MAAS admin API key and login
+      ansible.builtin.shell: |
+        set -e
+        APIKEY=$(/snap/bin/maas apikey --username="{{ maas_admin_user }}")
+        /snap/bin/maas login "{{ maas_admin_user }}" "{{ maas_url }}" "$APIKEY" >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Register PXE VMs in MAAS with Virsh power parameters
+      ansible.builtin.shell: |
+        set -e
+        EXISTING=$(/snap/bin/maas "{{ maas_admin_user }}" machines read | jq -r '.[] | select(.hostname=="{{ item.vm_name }}") | .system_id')
+        if [ -z "$EXISTING" ]; then
+          /snap/bin/maas "{{ maas_admin_user }}" machines create \
+            hostname="{{ item.vm_name }}" \
+            architecture="amd64/generic" \
+            mac_addresses="{{ item.mac_address }}" \
+            power_type="virsh" \
+            power_parameters_power_address="{{ virsh_power_address }}" \
+            power_parameters_power_id="{{ item.vm_name }}" \
+            power_parameters_power_user="{{ virsh_power_user }}" \
+            power_parameters_power_pass="{{ virsh_power_pass }}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ vms }}"
+      changed_when: true

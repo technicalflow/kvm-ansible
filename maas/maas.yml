@@ -1,0 +1,944 @@
+---
+- name: Deploy KVM VM using local Debian image
+  hosts: localhost
+  become: true
+  vars:
+    vm_name: "msksidb13maas01"
+    vm_memory_kb: 8388608 # 8192 MB
+    vm_vcpus: 4
+    disk_size: "64G"
+    admin_user: "madmin"
+    ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
+    vm_autostart: false
+    static_ip: "192.168.110.210/24"
+    gateway_ip: "192.168.110.253"
+    maas_subnet_cidr: "192.168.110.0/24"
+    dhcp_start_ip: "192.168.110.10"
+    dhcp_end_ip: "192.168.110.200"
+    network_mtu: 1514
+    timezone: "Europe/Warsaw"
+    libvirt_net_name: "maasnet01"
+    dns_servers:
+      - "1.1.1.1"
+      - "9.9.9.9"
+
+    # LXD, MAAS & Juju settings
+    lxd_snap_channel: "5.21/stable"
+    maas_snap_channel: "3.6/stable"
+    juju_controller_channel: "3.6/stable"
+    juju_snap_channel: "3.6/stable"
+    # lxdbr0 (Juju controller network) - routed via the MAAS VM so MAAS machines can reach the controller
+    lxd_bridge_ip: "172.22.0.1"
+    lxd_bridge_net: "172.22.0.0"
+    lxd_bridge_prefix: 24
+    maas_db_user: "maas"
+    maas_db_password: "dbpassword"
+    maas_db_name: "maas"
+    maas_admin_user: "maasadmin"
+    maas_admin_password: "maasadmin"
+    maas_admin_email: "maasadmin@localhost"
+    maas_url: "http://{{ static_ip.split('/')[0] }}:5240/MAAS"
+    maas_kernel_opts: "console=tty0 console=ttyS0,115200n8"
+
+    template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
+    disk_path: "/data/VMS/{{ vm_name }}.qcow2"
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware is installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: /data/VMS
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domain exists in libvirt
+      ansible.builtin.command: "virsh dominfo {{ vm_name }}"
+      register: virsh_dominfo
+      failed_when: false
+      changed_when: false
+
+    - name: Record if this is a fresh Day 1 deployment
+      ansible.builtin.set_fact:
+        is_fresh_install: "{{ virsh_dominfo.rc != 0 }}"
+
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Check if destination image already exists
+      ansible.builtin.stat:
+        path: "{{ disk_path }}"
+      register: destination_disk
+
+    - name: Create standalone VM disk from local template
+      ansible.builtin.copy:
+        src: "{{ template_image_path }}"
+        dest: "{{ disk_path }}"
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      when: not destination_disk.stat.exists
+
+    - name: Resize the image to desired disk size
+      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      register: resize_output
+      changed_when: "'Image resized' in resize_output.stdout"
+      when: not destination_disk.stat.exists
+
+    - name: Ensure guest agent is enabled in XML
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>{{ uefi_vars_path }}</nvram>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver="kvm"/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_path }}'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <!-- ether1: MAAS network interface -->
+              <interface type='network'>
+                <source network='{{ libvirt_net_name }}'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+      when: is_fresh_install
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        autostart: "{{ vm_autostart }}"
+
+    - name: Ensure VM is started
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    # - name: Set VM to autostart
+    #   community.libvirt.virt:
+    #     name: "{{ vm_name }}"
+    #     autostart: yes
+
+    - name: Ensure guest agent is responding
+      ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ vm_name }}"
+      register: agent_ready
+      until: agent_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      become: false
+
+    - name: Add new VM to dynamic inventory (via Out-of-band Channel)
+      ansible.builtin.add_host:
+        name: "{{ vm_name }}"
+        groups: spawned_maas_vms
+        vm_name: "{{ vm_name }}"
+        ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
+        ansible_libvirt_vm: "{{ vm_name }}"
+        ansible_remote_tmp: "/tmp/.ansible/tmp"
+        # ansible_user: "root"
+        admin_user: "{{ admin_user }}"
+        ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        is_fresh_install: "{{ is_fresh_install }}"
+        static_ip: "{{ static_ip }}"
+        dns_servers: "{{ dns_servers }}"
+        gateway_ip: "{{ gateway_ip }}"
+        maas_subnet_cidr: "{{ maas_subnet_cidr }}"
+        dhcp_start_ip: "{{ dhcp_start_ip }}"
+        dhcp_end_ip: "{{ dhcp_end_ip }}"
+        network_mtu: "{{ network_mtu }}"
+        timezone: "{{ timezone }}"
+        lxd_snap_channel: "{{ lxd_snap_channel }}"
+        maas_snap_channel: "{{ maas_snap_channel }}"
+        juju_controller_channel: "{{ juju_controller_channel }}"
+        juju_snap_channel: "{{ juju_snap_channel }}"
+        lxd_bridge_ip: "{{ lxd_bridge_ip }}"
+        lxd_bridge_prefix: "{{ lxd_bridge_prefix }}"
+        maas_db_user: "{{ maas_db_user }}"
+        maas_db_password: "{{ maas_db_password }}"
+        maas_db_name: "{{ maas_db_name }}"
+        maas_admin_user: "{{ maas_admin_user }}"
+        maas_admin_password: "{{ maas_admin_password }}"
+        maas_admin_email: "{{ maas_admin_email }}"
+        maas_url: "{{ maas_url }}"
+        maas_kernel_opts: "{{ maas_kernel_opts }}"
+
+    #    - name: Pause for 30 seconds
+    #      ansible.builtin.pause:
+    #        seconds: 30
+
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 20
+        sleep: 5
+        timeout: 60
+      delegate_to: "{{ vm_name }}"
+
+- name: Provision the spawned VM
+  hosts: spawned_maas_vms
+  gather_facts: true
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Stop and disable unattended upgrades and timesyncd services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - unattended-upgrades.service
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+        - systemd-timesyncd.service
+      failed_when: false
+
+    - name: Set system timezone to '{{ timezone }}'
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    - name: Load required kernel modules and persist across reboots
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - name: Configure sysctl parameters in /etc/sysctl.d/10-ip.conf
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/10-ip.conf
+        content: |
+          net.core.rmem_max = 262144
+          net.core.wmem_max = 262144
+          net.ipv4.tcp_rmem = 4096 87380 33554432
+          net.ipv4.tcp_wmem = 4096 65536 33554432
+          net.ipv4.ip_forward = 1
+          net.ipv4.tcp_mtu_probing=1
+          net.ipv4.ip_unprivileged_port_start=80
+          vm.swappiness=10
+          fs.aio-max-nr=524288
+          kernel.keys.maxbytes=2000000
+          kernel.keys.maxkeys=2000
+          vm.max_map_count=262144
+        owner: root
+        group: root
+        mode: "0644"
+      register: sysctl_config
+
+    - name: Reload sysctl settings
+      ansible.builtin.command: sysctl --system
+      when: sysctl_config.changed
+
+    - name: Configure KVM for nested virtualization
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/kvm.conf
+        content: "options kvm_intel nested=1\n"
+        mode: "0644"
+
+    - name: Expand root partition and filesystem
+      ansible.builtin.shell: |
+        ROOT_PART=$(findmnt -n -o SOURCE /)
+        ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+        ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+        growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+        FS_TYPE=$(findmnt -n -o FSTYPE /)
+        if [ "$FS_TYPE" = "xfs" ]; then
+          xfs_growfs /
+        else
+          resize2fs "$ROOT_PART"
+        fi
+      args:
+        executable: /bin/bash
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
+
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: yes
+
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
+
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+- name: Configure static IP on bridge br0 using systemd-networkd
+  hosts: spawned_maas_vms
+  gather_facts: true
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
+
+    - name: Write static /etc/resolv.conf (no dependency on systemd-resolved)
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: |
+          {% for dns in dns_servers %}
+          nameserver {{ dns }}
+          {% endfor %}
+        follow: false
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Define br0 bridge device in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-br0.netdev
+        content: |
+          [NetDev]
+          Name=br0
+          Kind=bridge
+          MTUBytes={{ network_mtu }}
+
+          [Bridge]
+          STP=no
+          ForwardDelaySec=0
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Attach ethernet interface to br0 in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/20-br0-en.network
+        content: |
+          [Match]
+          Name=e*
+
+          [Link]
+          MTUBytes={{ network_mtu }}
+
+          [Network]
+          Bridge=br0
+          DHCP=no
+          IPv6AcceptRA=no
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure static IP on br0 in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/30-br0.network
+        content: |
+          [Match]
+          Name=br0
+
+          [Link]
+          MTUBytes={{ network_mtu }}
+
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+          DHCP=no
+          IPv6AcceptRA=no
+
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart systemd-networkd to apply bridge static IP configuration
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+        enabled: true
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ ansible_facts['hostname'] }}"
+          - " Configured IP (br0): {{ static_ip }}"
+          - "=========================================="
+
+    - name: Pause for 10 seconds
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Wait for br0 bridge to become routable
+      ansible.builtin.command: /lib/systemd/systemd-networkd-wait-online --interface=br0 --timeout=30
+      changed_when: false
+
+- name: Update and install baseline tools and Ubuntu MAAS on the spawned VM
+  hosts: spawned_maas_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
+    - name: Configure APT to force IPv4 and retry on transient failures
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99force-ipv4-retries
+        content: |
+          Acquire::ForceIPv4 "true";
+          Acquire::Retries "5";
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Upgrade all installed packages
+      ansible.builtin.apt:
+        name: "*"
+        state: latest
+        update_cache: true
+
+    - name: Ensure baseline tools, PostgreSQL, and snapd are installed
+      ansible.builtin.apt:
+        name:
+          - nano
+          - htop
+          - git
+          - wget
+          - curl
+          - python3-passlib
+          - mtr-tiny
+          - unzip
+          - zip
+          - tmux
+          - apt-transport-https
+          - gnupg
+          - jq
+          - gpg
+          - snapd
+          - ansible
+          - postgresql
+          - postgresql-contrib
+        state: present
+
+    - name: Ensure libvirt tools are installed
+      ansible.builtin.apt:
+        name:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - virt-top
+          - ovmf
+          - libvirt-clients
+          - virtinst
+          - libvirt-dev
+          - libvirt-daemon-driver-lxc
+          - libvirt-login-shell
+        state: present
+
+    - name: Ensure snapd and postgresql services are enabled and running
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - snapd
+        - postgresql
+
+    - name: Wait for snapd seed to complete
+      ansible.builtin.command: snap wait system seed.loaded
+      changed_when: false
+
+    - name: Refresh snaps
+      ansible.builtin.command: snap refresh
+      changed_when: false
+
+    - name: Reboot VM to apply all changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+      become: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
+
+    - name: Pause for 10 seconds
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Install LXD via snap
+      community.general.snap:
+        name: lxd
+        channel: "{{ lxd_snap_channel }}"
+        state: present
+      register: lxd_snap_result
+      until: lxd_snap_result is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Add '{{ admin_user }}' to lxd, libvirt, and kvm groups
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups:
+          - lxd
+          - libvirt
+          - kvm
+        append: true
+
+    - name: Initialize LXD with preseed configuration
+      ansible.builtin.shell: |
+        /snap/bin/lxd waitready --timeout=60
+        /snap/bin/lxd init --preseed <<'EOF'
+        config:
+          core.https_address: "[::]:8443"
+        networks:
+        - config:
+            ipv4.address: {{ lxd_bridge_ip }}/{{ lxd_bridge_prefix }}
+            ipv4.nat: "true"
+            ipv6.address: auto
+          description: ""
+          name: lxdbr0
+          type: ""
+          project: default
+        storage_pools:
+        - config: {}
+          description: ""
+          name: lxdpool1
+          driver: dir
+        storage_volumes: []
+        profiles:
+        - config:
+            limits.cpu: "4"
+            limits.memory: 2GB
+            limits.memory.enforce: soft
+            limits.memory.swap: "false"
+          description: ""
+          devices:
+            eth0:
+              name: eth0
+              nictype: bridged
+              parent: br0
+              type: nic
+            root:
+              path: /
+              pool: lxdpool1
+              type: disk
+          name: default
+        projects: []
+        cluster: null
+        EOF
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Disable DNS on lxdbr0
+      ansible.builtin.command: /snap/bin/lxc network set lxdbr0 dns.mode=none
+      changed_when: true
+
+    - name: Install Ubuntu MAAS via snap
+      community.general.snap:
+        name: maas
+        channel: "{{ maas_snap_channel }}"
+        state: present
+      register: maas_snap_result
+      until: maas_snap_result is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Create PostgreSQL user and database for MAAS
+      ansible.builtin.shell: |
+        su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname = '{{ maas_db_user }}'\" | grep -q 1 || psql -c \"CREATE USER \\\"{{ maas_db_user }}\\\" WITH ENCRYPTED PASSWORD '{{ maas_db_password }}';\""
+        su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ maas_db_name }}'\" | grep -q 1 || createdb -O \"{{ maas_db_user }}\" \"{{ maas_db_name }}\""
+        su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE \\\"{{ maas_db_name }}\\\" TO \\\"{{ maas_db_user }}\\\";\""
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Find pg_hba.conf path
+      ansible.builtin.shell: su - postgres -c "psql -t -P format=unaligned -c 'SHOW hba_file;'"
+      register: pg_hba_file
+      changed_when: false
+
+    - name: Allow MAAS PostgreSQL user access in pg_hba.conf
+      ansible.builtin.lineinfile:
+        path: "{{ pg_hba_file.stdout | trim }}"
+        line: "host    {{ maas_db_name }}    {{ maas_db_user }}    127.0.0.1/32    scram-sha-256"
+        insertbefore: BOF
+        state: present
+      register: pg_hba_updated
+
+    - name: Reload PostgreSQL if pg_hba.conf changed
+      ansible.builtin.systemd:
+        name: postgresql
+        state: reloaded
+      when: pg_hba_updated.changed
+
+    - name: Initialize MAAS region+rack controller
+      ansible.builtin.command: >
+        /snap/bin/maas init region+rack
+        --database-uri "postgres://{{ maas_db_user }}:{{ maas_db_password }}@127.0.0.1/{{ maas_db_name }}"
+        --maas-url "{{ maas_url }}"
+      changed_when: true
+
+    - name: Create MAAS admin user
+      ansible.builtin.command: >
+        /snap/bin/maas createadmin
+        --username="{{ maas_admin_user }}"
+        --password="{{ maas_admin_password }}"
+        --email="{{ maas_admin_email }}"
+      changed_when: true
+
+    - name: Retrieve MAAS admin API key
+      ansible.builtin.command: /snap/bin/maas apikey --username="{{ maas_admin_user }}"
+      register: maas_api_key
+      changed_when: false
+
+    - name: Pause for 30 seconds
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Login to MAAS CLI
+      ansible.builtin.command: >
+        /snap/bin/maas login "{{ maas_admin_user }}" "{{ maas_url }}" "{{ maas_api_key.stdout | trim }}"
+      changed_when: true
+
+    - name: Add SSH Key
+      ansible.builtin.command: >
+        /snap/bin/maas "{{ maas_admin_user }}" sshkeys create key="{{ lookup('file', ssh_pub_key_file) }}"
+      changed_when: true
+
+    - name: Configure MAAS settings
+      ansible.builtin.command: "/snap/bin/maas {{ maas_admin_user }} maas set-config {{ item }}"
+      loop:
+        - "name=enable_analytics value=false"
+        - "name=release_notifications value=false"
+        - "name=kernel_opts value='{{ maas_kernel_opts }}'"
+        - "name=completed_intro value=true"
+      changed_when: true
+
+    # - name: Set MAAS region worker count in regiond.conf
+    #   ansible.builtin.lineinfile:
+    #     path: /var/snap/maas/current/regiond.conf
+    #     regexp: '^num_workers:'
+    #     line: "num_workers: 2"
+    #   register: maas_regiond_conf
+
+    # - name: Restart MAAS to apply regiond.conf changes
+    #   ansible.builtin.command: snap restart maas
+    #   when: maas_regiond_conf.changed
+    #   changed_when: true
+
+    # - name: Wait for MAAS API to come back
+    #   ansible.builtin.uri:
+    #     url: "{{ maas_url }}/api/2.0/version/"
+    #     status_code: 200
+    #   register: maas_api_up
+    #   until: maas_api_up.status == 200
+    #   retries: 30
+    #   delay: 5
+
+    - name: Update MAAS subnet gateway and DNS servers
+      ansible.builtin.command: >
+        /snap/bin/maas {{ maas_admin_user }} subnet update {{ maas_subnet_cidr }}
+        gateway_ip={{ gateway_ip }}
+        dns_servers="{{ dns_servers | join(',') }}"
+      changed_when: true
+
+    - name: Trigger MAAS boot-resources import
+      ansible.builtin.command: /snap/bin/maas {{ maas_admin_user }} boot-resources import
+      changed_when: true
+
+    - name: Wait for MAAS boot-resources to finish importing
+      ansible.builtin.command: /snap/bin/maas {{ maas_admin_user }} boot-resources is-importing
+      register: maas_boot_import
+      until: maas_boot_import.stdout | trim == 'false'
+      retries: 60
+      delay: 15
+      changed_when: false
+
+    - name: Wait for rack controller to sync boot images
+      ansible.builtin.shell: |
+        RACK_ID=$(/snap/bin/maas "{{ maas_admin_user }}" rack-controllers read | jq -r '.[0].system_id')
+        /snap/bin/maas "{{ maas_admin_user }}" rack-controller list-boot-images "$RACK_ID" | jq -r '.status'
+      args:
+        executable: /bin/bash
+      register: rack_sync_status
+      until: rack_sync_status.stdout | trim == 'synced'
+      retries: 10
+      delay: 60
+      changed_when: false
+
+    - name: Create 'public' space in MAAS
+      ansible.builtin.command: /snap/bin/maas {{ maas_admin_user }} spaces create name=public
+      changed_when: true
+
+    - name: Configure Dynamic IP range, 'public' space, and enable DHCP on Fabric/VLAN for '{{ maas_subnet_cidr }}'
+      ansible.builtin.shell: |
+        set -e
+        SUBNET_ID=$(/snap/bin/maas "{{ maas_admin_user }}" subnets read | jq -r '.[] | select(.cidr=="{{ maas_subnet_cidr }}") | .id')
+        FABRIC_ID=$(/snap/bin/maas "{{ maas_admin_user }}" subnets read | jq -r '.[] | select(.cidr=="{{ maas_subnet_cidr }}") | .vlan.fabric_id')
+        VLAN_VID=$(/snap/bin/maas "{{ maas_admin_user }}" subnets read | jq -r '.[] | select(.cidr=="{{ maas_subnet_cidr }}") | .vlan.vid')
+        RACK_ID=$(/snap/bin/maas "{{ maas_admin_user }}" rack-controllers read | jq -r '.[0].system_id')
+
+        /snap/bin/maas "{{ maas_admin_user }}" ipranges create type=dynamic subnet="$SUBNET_ID" start_ip="{{ dhcp_start_ip }}" end_ip="{{ dhcp_end_ip }}"
+        /snap/bin/maas "{{ maas_admin_user }}" subnet update "$SUBNET_ID" gateway_ip="{{ gateway_ip }}"
+        /snap/bin/maas "{{ maas_admin_user }}" vlan update "$FABRIC_ID" "$VLAN_VID" dhcp_on=true primary_rack="$RACK_ID" space=public
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # - name: Fix BIND coexistence with LXC/LXD dnsmasq and avahi-daemon
+    #   ansible.builtin.shell: |
+    #     if [ -f /etc/bind/named.conf.options ]; then
+    #       IP=$(ip -4 addr show scope global | grep inet | head -n1 | awk '{print $2}' | cut -d/ -f1)
+    #       sed -i 's/listen-on-v6 { any; };/listen-on-v6 { none; };/' /etc/bind/named.conf.options
+    #       sed -i "/listen-on-v6 { none; };/a\\listen-on { $IP; };" /etc/bind/named.conf.options
+    #     fi
+    #   args:
+    #     executable: /bin/bash
+    #   changed_when: true
+
+    - name: Install Juju via snap
+      community.general.snap:
+        name: juju
+        channel: "{{ juju_snap_channel }}"
+        state: present
+      register: juju_snap_result
+      until: juju_snap_result is succeeded
+      retries: 3
+      delay: 5
+
+    # - name: Ensure ~/.local/share exists for strictly confined Juju snap
+    #   ansible.builtin.file:
+    #     path: "/home/{{ admin_user }}/{{ item }}"
+    #     state: directory
+    #     owner: "{{ admin_user }}"
+    #     group: users
+    #     mode: "0700"
+    #   loop:
+    #     - .local
+    #     - .local/share
+
+    - name: Provision Juju Controller as LXD container on localhost (with systemd)
+      ansible.builtin.command: >
+        systemd-run --scope --unit="snap.juju.juju.ansiblebootstrap"
+        sudo -H -u {{ admin_user }}
+        /snap/bin/juju bootstrap localhost lxd-controller --config bootstrap-timeout=1200
+        --controller-charm-channel={{ juju_controller_channel }}
+        --bootstrap-constraints "virt-type=container"
+      changed_when: true
+
+    - name: Set autostart for Juju controller LXD container
+      ansible.builtin.shell: |
+        /snap/bin/lxc config set $(/snap/bin/lxc list --format csv -c n | grep '^juju-') boot.autostart true
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Create maascloud.yaml in admin user home directory
+      ansible.builtin.copy:
+        dest: "/home/{{ admin_user }}/maascloud.yaml"
+        content: |
+          clouds:
+            maas-cloud:
+              type: maas
+              auth-types: [oauth1]
+              endpoint: {{ maas_url }}
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0600"
+
+    - name: Create maascredentials.yaml in admin user home directory
+      ansible.builtin.copy:
+        dest: "/home/{{ admin_user }}/maascredentials.yaml"
+        content: |
+          credentials:
+            maas-cloud:
+              {{ maas_admin_user }}:
+                auth-type: oauth1
+                maas-oauth: "{{ maas_api_key.stdout | trim }}"
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0600"
+
+    - name: Add Maas Cloud, credentials, and production model to JUJU (with systemd)
+      ansible.builtin.shell: |
+        set -e
+        systemd-run --scope --unit="snap.juju.juju.ansiblebootstrap2" sudo -H -u {{ admin_user }} bash -e << 'EOF'
+        /snap/bin/juju add-cloud --client --controller lxd-controller maas-cloud -f "/home/{{ admin_user }}/maascloud.yaml"
+        /snap/bin/juju add-credential --client --controller lxd-controller maas-cloud -f "/home/{{ admin_user }}/maascredentials.yaml"
+        /snap/bin/juju add-model production maas-cloud
+        EOF
+      args:
+        executable: /bin/bash
+      changed_when: true
+    - name: Verify Juju clouds, credentials, models, and status
+      ansible.builtin.shell: |
+        systemd-run --scope --unit="snap.juju.juju.verify-$$" sudo -H -u {{ admin_user }} bash -e << 'EOF'
+        /snap/bin/juju list-clouds
+        /snap/bin/juju credentials
+        /snap/bin/juju list-models
+        /snap/bin/juju status
+        EOF
+      args:
+        executable: /bin/bash
+      register: juju_verification
+      changed_when: false
+
+    - name: Display Juju verification output
+      ansible.builtin.debug:
+        var: juju_verification.stdout_lines
+
+    - name: Reboot VM to apply all changes
+      ansible.builtin.reboot:
+        reboot_timeout: 120
+# eth0:
+#   name: eth0
+#   network: lxdbr0
+#   type: nic

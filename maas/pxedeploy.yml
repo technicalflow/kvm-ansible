@@ -1,0 +1,201 @@
+---
+- name: Deploy KVM VMs with dual disks and isolated network for PXE boot
+  hosts: localhost
+  become: true
+  vars:
+    vms:
+      - vm_name: "maaspxe1"
+        mac_address: "52:54:00:11:00:01"
+      - vm_name: "maaspxe2"
+        mac_address: "52:54:00:11:00:02"
+      - vm_name: "maaspxe3"
+        mac_address: "52:54:00:11:00:03"
+
+    vm_memory_kb: 8388608 # 8192 MB each
+    vm_vcpus: 4
+    disk1_size: "32G"
+    disk2_size: "60G"
+    disk_dir: "/nvme/vms"
+    vm_autostart: false
+
+    maas_net_name: "maasnet01"
+
+    uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
+    uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
+    emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
+
+  tasks:
+    - name: Ensure required packages are installed (RedHat/CentOS/Fedora)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-img
+          - libvirt-client
+          - edk2-ovmf
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure UEFI firmware and libvirt tools are installed (Debian/Ubuntu)
+      ansible.builtin.package:
+        name:
+          - python3-libvirt
+          - qemu-utils
+          - libvirt-clients
+          - ovmf
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure libvirt UEFI NVRAM directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/qemu/nvram
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure target disk directory exists
+      ansible.builtin.file:
+        path: "{{ disk_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check if VM domains exist in libvirt
+      ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item.vm_name }}"
+      register: virsh_dominfo
+      loop: "{{ vms }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Record fresh install status per VM
+      ansible.builtin.set_fact:
+        is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
+      loop: "{{ virsh_dominfo.results }}"
+
+    - name: End play early if all VMs are already provisioned
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All VMs ({{ is_fresh_install_map.keys() | list | join(', ') }}) are already defined in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
+
+    - name: Check if primary disks (disk1) already exist
+      ansible.builtin.stat:
+        path: "{{ disk_dir }}/{{ item.vm_name }}-disk1.qcow2"
+      loop: "{{ vms }}"
+      register: disk1_stat
+
+    - name: Create empty primary qcow2 disks ({{ disk1_size }})
+      ansible.builtin.command: >
+        qemu-img create -f qcow2 {{ disk_dir }}/{{ item.item.vm_name }}-disk1.qcow2 {{ disk1_size }}
+      loop: "{{ disk1_stat.results }}"
+      when: not item.stat.exists
+      changed_when: true
+
+    - name: Check if secondary disks (disk2) already exist
+      ansible.builtin.stat:
+        path: "{{ disk_dir }}/{{ item.vm_name }}-disk2.qcow2"
+      loop: "{{ vms }}"
+      register: disk2_stat
+
+    - name: Create empty secondary qcow2 disks ({{ disk2_size }})
+      ansible.builtin.command: >
+        qemu-img create -f qcow2 {{ disk_dir }}/{{ item.item.vm_name }}-disk2.qcow2 {{ disk2_size }}
+      loop: "{{ disk2_stat.results }}"
+      when: not item.stat.exists
+      changed_when: true
+
+    - name: Define PXE-bootable KVM domains in libvirt
+      community.libvirt.virt:
+        command: define
+        xml: |
+          <domain type='kvm'>
+            <name>{{ item.vm_name }}</name>
+            <memory unit='KiB'>{{ vm_memory_kb }}</memory>
+            <currentMemory unit='KiB'>{{ vm_memory_kb }}</currentMemory>
+            <description>VM provisioned by Ansible</description>
+            <vcpu placement='static'>{{ vm_vcpus }}</vcpu>
+            <cpu mode='host-passthrough' check='none'>
+              <topology sockets='1' dies='1' clusters='1' cores='{{ vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
+            </cpu>
+            <os>
+              <type arch='x86_64' machine='q35'>hvm</type>
+              <loader readonly='yes' secure='no' type='pflash' format='raw'>{{ uefi_code_path }}</loader>
+              <nvram template='{{ uefi_vars_template_path }}' templateFormat='raw' format='raw'>/var/lib/libvirt/qemu/nvram/{{ item.vm_name }}_VARS.fd</nvram>
+              <boot dev='network'/>
+              <boot dev='hd'/>
+              <bootmenu enable='no'/>
+            </os>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>destroy</on_crash>
+            <features>
+              <acpi/>
+              <apic/>
+              <smm state='on'/>
+              <ioapic driver='kvm'/>
+            </features>
+            <clock offset='utc'>
+              <timer name='rtc' tickpolicy='catchup'/>
+              <timer name='pit' tickpolicy='delay'/>
+              <timer name='hpet' present='no'/>
+            </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+              <emulator>{{ emulator_path }}</emulator>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ disk_dir }}/{{ item.vm_name }}-disk1.qcow2'/>
+                <target dev='vda' bus='virtio'/>
+              </disk>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2'/>
+                <source file='{{ disk_dir }}/{{ item.vm_name }}-disk2.qcow2'/>
+                <target dev='vdb' bus='virtio'/>
+              </disk>
+              <interface type='network'>
+                <mac address='{{ item.mac_address }}'/>
+                <source network='{{ maas_net_name }}'/>
+                <model type='virtio'/>
+                <link state='up'/>
+              </interface>
+              <controller type='virtio-serial' index='0'/>
+              <channel type='unix'>
+                <source mode='bind'/>
+                <target type='virtio' name='org.qemu.guest_agent.0'/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
+              </channel>
+              <serial type='pty'>
+                <target type='isa-serial' port='0'>
+                  <model name='isa-serial'/>
+                </target>
+              </serial>
+              <console type='pty'>
+                <target type='serial' port='0'/>
+              </console>
+              <input type='mouse' bus='ps2'/>
+              <input type='keyboard' bus='ps2'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+            </devices>
+          </domain>
+      loop: "{{ vms }}"
+      when: is_fresh_install_map[item.vm_name]
+
+    - name: Configure VM autostart
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        autostart: "{{ vm_autostart }}"
+      loop: "{{ vms }}"
+
+    - name: Ensure VMs are started (initiating PXE boot)
+      community.libvirt.virt:
+        name: "{{ item.vm_name }}"
+        state: running
+      loop: "{{ vms }}"
