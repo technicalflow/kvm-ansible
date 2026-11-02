@@ -411,7 +411,6 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.package:
         name:
-          - mc
           - htop
           - curl
           - wget

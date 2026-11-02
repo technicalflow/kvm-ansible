@@ -14,7 +14,7 @@
     gateway_ip: "192.168.110.253"
     maas_subnet_cidr: "192.168.110.0/24"
     dhcp_start_ip: "192.168.110.10"
-    dhcp_end_ip: "192.168.110.200"
+    dhcp_end_ip: "192.168.110.100"
     network_mtu: 1514
     timezone: "Europe/Warsaw"
     libvirt_net_name: "maasnet01"
