@@ -1,7 +1,7 @@
 ---
 - name: Provision Helm, MetalLB, Metrics Server, Traefik, and Longhorn
   hosts: "{{ groups['k8s_masters'][0] }}"
-  gather_facts: false
+  gather_facts: true
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
   vars:
@@ -99,6 +99,17 @@
             --timeout=180s
           changed_when: false
 
+        - name: Resolve public network interface
+          ansible.builtin.set_fact:
+            metallb_interface: >-
+              {{
+                ansible_facts.interfaces
+                | map('extract', ansible_facts)
+                | selectattr('macaddress', 'equalto', br0_mac)
+                | map(attribute='device')
+                | first
+              }}
+
         - name: Create MetalLB IPAddressPool and L2Advertisement manifest
           ansible.builtin.copy:
             dest: /opt/metallb-config.yaml
@@ -121,6 +132,8 @@
               spec:
                 ipAddressPools:
                   - br0-pool
+                interfaces:
+                  - {{ metallb_interface }}
                 nodeSelectors:
                   - matchLabels:
                       node-role.kubernetes.io/control-plane: ""
