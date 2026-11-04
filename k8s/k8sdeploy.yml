@@ -887,6 +887,18 @@
         replace: "path: /etc/kubernetes/admin.conf"
       when: num_masters > 1 and not k8s_admin_conf.stat.exists
 
+    - name: Wait for kubelet to reload kube-vip static pod with admin.conf
+      ansible.builtin.command: >
+        kubectl --server=https://{{ node_ip }}:6443
+        get pod -n kube-system kube-vip-{{ vm_name }}
+        -o jsonpath='{.spec.volumes[?(@.name=="kubeconfig")].hostPath.path}:{.status.conditions[?(@.type=="Ready")].status}'
+      register: kube_vip_pod_status
+      until: kube_vip_pod_status.rc == 0 and kube_vip_pod_status.stdout == '/etc/kubernetes/admin.conf:True'
+      retries: 30
+      delay: 3
+      changed_when: false
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+
     - name: Create .kube directories for root and {{ admin_user }}
       ansible.builtin.file:
         path: "{{ item.path }}"
@@ -1064,14 +1076,16 @@
         vip_interface: "{{ ansible_facts.interfaces | map('extract', ansible_facts) | selectattr('macaddress', 'defined') | selectattr('macaddress', 'equalto', nat_mac) | map(attribute='device') | first }}"
       when: not kubelet_conf.stat.exists
 
-    - name: Ensure /etc/kubernetes/manifests directory exists
-      ansible.builtin.file:
-        path: /etc/kubernetes/manifests
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+    - name: Join additional master node to cluster as control-plane
+      ansible.builtin.command: >
+        kubeadm join {{ control_plane_vip }}:{{ control_plane_vip_port }}
+        --token {{ hostvars[first_master]['k8s_join_token'] }}
+        --discovery-token-ca-cert-hash sha256:{{ hostvars[first_master]['k8s_ca_cert_hash'] }}
+        --control-plane
+        --certificate-key {{ hostvars[first_master]['k8s_certificate_key'] }}
+        --apiserver-advertise-address={{ static_ip.split('/')[0] }}
       when: not kubelet_conf.stat.exists
+      no_log: true
 
     - name: Generate kube-vip static pod manifest for HA control-plane endpoint
       ansible.builtin.shell: |
@@ -1085,31 +1099,6 @@
       args:
         executable: /bin/bash
         creates: /etc/kubernetes/manifests/kube-vip.yaml
-      when: not kubelet_conf.stat.exists
-
-    - name: Point kube-vip manifest at super-admin.conf during bootstrap
-      ansible.builtin.replace:
-        path: /etc/kubernetes/manifests/kube-vip.yaml
-        regexp: "path: /etc/kubernetes/admin.conf"
-        replace: "path: /etc/kubernetes/super-admin.conf"
-      when: not kubelet_conf.stat.exists
-
-    - name: Join additional master node to cluster as control-plane
-      ansible.builtin.command: >
-        kubeadm join {{ control_plane_vip }}:{{ control_plane_vip_port }}
-        --token {{ hostvars[first_master]['k8s_join_token'] }}
-        --discovery-token-ca-cert-hash sha256:{{ hostvars[first_master]['k8s_ca_cert_hash'] }}
-        --control-plane
-        --certificate-key {{ hostvars[first_master]['k8s_certificate_key'] }}
-        --apiserver-advertise-address={{ static_ip.split('/')[0] }}
-      when: not kubelet_conf.stat.exists
-      no_log: true
-
-    - name: Point kube-vip manifest back at admin.conf after bootstrap
-      ansible.builtin.replace:
-        path: /etc/kubernetes/manifests/kube-vip.yaml
-        regexp: "path: /etc/kubernetes/super-admin.conf"
-        replace: "path: /etc/kubernetes/admin.conf"
       when: not kubelet_conf.stat.exists
 
     - name: Create .kube directories for root and {{ admin_user }}
@@ -1236,7 +1225,7 @@
     - name: Check which VM domains exist
       ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item }}"
       register: teardown_domain_info
-      loop: "{{ teardown_vm_names }}"
+      loop: "{{   teardown_vm_names }}"
       failed_when: false
       changed_when: false
 
@@ -1287,6 +1276,5 @@
       register: teardown_network_undefine
       failed_when: "teardown_network_undefine.rc != 0 and 'network not found' not in teardown_network_undefine.stderr | lower"
       changed_when: teardown_network_undefine.rc == 0
-
 # Required collections on Ansible control node:
 # ansible-galaxy collection install community.libvirt ansible.posix community.general
