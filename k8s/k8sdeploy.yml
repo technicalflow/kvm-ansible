@@ -4,27 +4,43 @@
   serial: 1
   become: true
   vars:
+    # Accumulator for the dynamic VM list built in pre_tasks below. Must
+    # start as an empty list: the set_fact loop references `vms` on the
+    # right-hand side of its own assignment on every iteration.
     vms: []
-    # Number of master (must be 1) and worker VMs to provision
-    num_masters: 1
-    num_workers: 2
+
+    # Number of master and worker VMs to provision.
+    # NOTE: num_masters > 1 enables a kube-vip powered HA control plane
+    # (see control_plane_vip below). The static-IP math a few lines down
+    # does simple last-octet addition with no carry, so keep
+    # num_masters + num_workers well under 250 on a /24-sized allocation.
+    num_masters: 3
+    num_workers: 3
 
     # VM naming — nodes are named <vm_name_prefix><zero-padded index>
-    vm_name_prefix: "mskladb13k8ss"
+    vm_name_prefix: "msksidb13k8sa"
+    extra_disk: true
 
-    # Dedicated NAT network (192.168.63.0/24) for all Kubernetes nodes
+    # Dedicated NAT network for all Kubernetes nodes
     nat_network_name: "nat-{{ vm_name_prefix[-4:] }}"
     nat_bridge_name: "virbr-{{ vm_name_prefix[-4:] }}"
-    nat_gateway_ip: "192.168.65.1"
+    nat_gateway_ip: "192.168.67.1"
     nat_netmask: "255.255.255.0"
     nat_ip_subnet: "/24"
-    nat_mac_prefix: "52:54:00:63:10"
+    nat_mac_prefix: "52:54:00:63:30"
+
+    # Workers only ever get a NAT-network NIC, while masters also have a
+    # br0 NIC — Calico's node-IP autodetection must be pinned to the NAT
+    # subnet so it doesn't pick br0 on masters instead.
+    calico_node_address_cidr: "{{ nat_gateway_ip.split('.')[:3] | join('.') }}.0{{ nat_ip_subnet }}"
 
     # Host bridge (br0) network settings for second adapter on master nodes
+    # First master's IP (br0_ip_base); further masters increment from it
     br0_bridge_name: "br0"
-    br0_ip_base: "192.168.50.237/23"
+    br0_ip_base: "192.168.50.238"
+    br0_ip_subnet: "/23"
     br0_gateway_ip: "192.168.50.250"
-    br0_mac_prefix: "52:54:00:50:10"
+    br0_mac_prefix: "52:54:00:50:30"
     dns_servers:
       - "9.9.9.9"
       - "192.168.50.242"
@@ -33,7 +49,7 @@
     master_disk_size: "32G"
     master_extra_disk_size: "30G"
     master_vm_vcpus: 4
-    master_vm_memory_kb: 2097152 # 2048 MB
+    master_vm_memory_kb: 4194304 # 4096 MB
 
     # Worker VM resources (from Vagrantfile: 4 CPUs, 2048 MB)
     worker_disk_size: "32G"
@@ -43,9 +59,18 @@
 
     # Kubernetes settings
     k8s_version: "v1.37"
-    pod_network_cidr: "172.22.0.0/16"
+    pod_network_cidr: "172.21.0.0/16"
     calico_version: "v3.32.1"
     timezone: "Europe/Warsaw"
+
+    # HA control-plane endpoint, fronted by kube-vip (ARP mode) whenever
+    # num_masters > 1. Must be a free address on the NAT network
+    # (nat_gateway_ip's /24) — it has to be reachable by workers, which
+    # only ever get a NAT-network NIC, so this cannot live on br0.
+    control_plane_vip: "192.168.67.200"
+    control_plane_vip_port: 6443
+    # Re-check https://github.com/kube-vip/kube-vip/releases before bumping.
+    kube_vip_version: "v1.3.1"
 
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
@@ -59,15 +84,6 @@
     emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
 
   pre_tasks:
-    - name: Validate master node count
-      ansible.builtin.assert:
-        that:
-          - num_masters | int == 1
-        fail_msg: >-
-          Deploying {{ num_masters }} master nodes is not supported.
-          Only a single master node (num_masters: 1) is currently supported due to lack of a multi-control-plane setup (load balancer, stacked control plane join).
-        success_msg: "Master node count validated (num_masters: 1)."
-
     - name: Build dynamic VM list from num_masters and num_workers
       ansible.builtin.set_fact:
         vms: >-
@@ -77,13 +93,15 @@
               'is_master': (idx < num_masters),
               'static_ip': (nat_gateway_ip.split('.')[:3] | join('.')) ~ '.' ~
                            (((nat_gateway_ip.split('.')[3] | int) + idx + 1) | string) ~ nat_ip_subnet,
-              'br0_ip': br0_ip_base if idx < num_masters else '',
+              'br0_ip': ((br0_ip_base.split('.')[:3] | join('.')) ~ '.' ~
+                         (((br0_ip_base.split('.')[3] | int) + idx) | string) ~ br0_ip_subnet)
+                        if idx < num_masters else '',
               'nat_mac': nat_mac_prefix ~ ':' ~ ('%02x' | format(idx + 2)),
               'br0_mac': br0_mac_prefix ~ ':' ~ ('%02x' | format(idx + 2)),
-              'disk_size':       master_disk_size       if idx < num_masters else worker_disk_size,
+              'disk_size':    master_disk_size    if idx < num_masters else worker_disk_size,
               'extra_disk_size': master_extra_disk_size if idx < num_masters else worker_extra_disk_size,
-              'vm_vcpus':        master_vm_vcpus        if idx < num_masters else worker_vm_vcpus,
-              'vm_memory_kb':    master_vm_memory_kb    if idx < num_masters else worker_vm_memory_kb
+              'vm_vcpus':     master_vm_vcpus     if idx < num_masters else worker_vm_vcpus,
+              'vm_memory_kb': master_vm_memory_kb if idx < num_masters else worker_vm_memory_kb
             }]
           }}
       loop: "{{ range(0, num_masters + num_workers) | list }}"
@@ -146,7 +164,7 @@
         group: root
         mode: "0755"
 
-    - name: Ensure target disk directories exist
+    - name: Ensure target disk directory exists
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -196,9 +214,10 @@
       loop: "{{ destination_disks.results }}"
       when: not item.stat.exists
 
-    - name: Resize the image to desired disk size
+    - name: Resize the images to desired disk size
       ansible.builtin.command: "qemu-img resize {{ target_disk_dir }}/{{ item.item.vm_name }}.qcow2 {{ item.item.disk_size }}"
-      changed_when: not item.stat.exists
+      register: resize_output
+      changed_when: true
       loop: "{{ destination_disks.results }}"
       when: not item.stat.exists
 
@@ -207,12 +226,13 @@
         path: "{{ target_extra_disk_dir }}/{{ item.vm_name }}_extra.qcow2"
       loop: "{{ vms }}"
       register: destination_extra_disks
+      when: extra_disk
 
     - name: Create extra disk images for VMs
       ansible.builtin.command: "qemu-img create -f qcow2 {{ target_extra_disk_dir }}/{{ item.item.vm_name }}_extra.qcow2 {{ item.item.extra_disk_size }}"
       changed_when: not item.stat.exists
       loop: "{{ destination_extra_disks.results }}"
-      when: not item.stat.exists
+      when: extra_disk and not item.stat.exists
 
     - name: Define VM domains in libvirt
       community.libvirt.virt:
@@ -226,6 +246,7 @@
             <vcpu placement='static'>{{ item.vm_vcpus }}</vcpu>
             <cpu mode='host-passthrough' check='none'>
               <topology sockets='1' dies='1' clusters='1' cores='{{ item.vm_vcpus }}' threads='1'/>
+              <feature policy='require' name='vmx'/>
             </cpu>
             <os>
               <type arch='x86_64' machine='q35'>hvm</type>
@@ -259,11 +280,13 @@
                 <source file='{{ target_disk_dir }}/{{ item.vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
+              {% if extra_disk %}
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
                 <source file='{{ target_extra_disk_dir }}/{{ item.vm_name }}_extra.qcow2'/>
                 <target dev='vdb' bus='virtio'/>
               </disk>
+              {% endif %}
               {% if item.is_master %}
               <interface type='bridge'>
                 <mac address='{{ item.br0_mac }}'/>
@@ -311,6 +334,8 @@
         name: "{{ item.vm_name }}"
         state: running
       loop: "{{ vms }}"
+      loop_control:
+        pause: 5
 
     - name: Ensure guest agent is responding
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
@@ -319,9 +344,10 @@
       retries: 20
       delay: 3
       changed_when: false
+      become: false
       loop: "{{ vms }}"
 
-    - name: Add cluster VMs to dynamic inventory
+    - name: Add new VMs to dynamic inventory
       ansible.builtin.add_host:
         name: "{{ item.vm_name }}"
         groups:
@@ -337,10 +363,8 @@
         br0_mac: "{{ item.br0_mac }}"
         disk_size: "{{ item.disk_size }}"
         extra_disk_size: "{{ item.extra_disk_size }}"
-        br0_bridge_name: "{{ br0_bridge_name }}"
-        nat_network_name: "{{ nat_network_name }}"
+        extra_disk: "{{ extra_disk }}"
         nat_gateway_ip: "{{ nat_gateway_ip }}"
-        nat_ip_subnet: "{{ nat_ip_subnet }}"
         br0_gateway_ip: "{{ br0_gateway_ip }}"
         dns_servers: "{{ dns_servers }}"
         k8s_version: "{{ k8s_version }}"
@@ -349,11 +373,18 @@
         timezone: "{{ timezone }}"
         ansible_connection: community.libvirt.libvirt_qemu
         ansible_libvirt_uri: "qemu:///system"
-        admin_user: "{{ admin_user }}"
+        ansible_libvirt_vm: "{{ item.vm_name }}"
         ansible_user: "root"
+        admin_user: "{{ admin_user }}"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
+        calico_node_address_cidr: "{{ calico_node_address_cidr }}"
+        control_plane_vip: "{{ control_plane_vip }}"
+        control_plane_vip_port: "{{ control_plane_vip_port }}"
+        kube_vip_version: "{{ kube_vip_version }}"
         is_fresh_install: "{{ is_fresh_install_map[item.vm_name] }}"
       loop: "{{ vms }}"
+      loop_control:
+        loop_var: item
 
 - name: Configure OS, hostname, user, and network on spawned VMs sequentially
   hosts: spawned_vms
@@ -400,6 +431,7 @@
           community.general.filesystem:
             fstype: ext4
             dev: /dev/vdb
+          when: extra_disk
 
         - name: Mount /dev/vdb to /var/lib/longhorn
           ansible.posix.mount:
@@ -408,6 +440,7 @@
             fstype: ext4
             opts: defaults
             state: mounted
+          when: extra_disk
 
         - name: Set timezone to {{ timezone }}
           ansible.builtin.command: "timedatectl set-timezone {{ timezone }}"
@@ -471,7 +504,7 @@
             group: root
             mode: "0755"
 
-        - name: Configure first adapter (br0) in systemd-networkd on master node
+        - name: Configure first adapter (br0) in systemd-networkd on master nodes
           ansible.builtin.copy:
             dest: /etc/systemd/network/20-br0.network
             content: |
@@ -518,22 +551,11 @@
             group: root
             mode: "0644"
 
-        - name: Ensure systemd-networkd is enabled and restarted to apply network configuration
+        - name: Restart systemd-networkd
           ansible.builtin.systemd:
             name: systemd-networkd
             enabled: true
             state: restarted
-
-        # - name: Ensure DNS servers in /etc/resolv.conf
-        #   ansible.builtin.copy:
-        #     dest: /etc/resolv.conf
-        #     content: |
-        #       {% for dns in dns_servers %}
-        #       nameserver {{ dns }}
-        #       {% endfor %}
-        #     owner: root
-        #     group: root
-        #     mode: "0644"
 
         - name: Display VM Hostname and IP address summary
           ansible.builtin.debug:
@@ -561,8 +583,11 @@
 
     - name: Upgrade all installed packages
       ansible.builtin.apt:
-        upgrade: dist
+        name: "*"
+        state: latest
         update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     - name: Ensure baseline and Kubernetes prerequisite packages are installed
       ansible.builtin.apt:
@@ -584,6 +609,8 @@
         state: present
         autoclean: true
         autoremove: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     # - name: Disable swap immediately
     #   ansible.builtin.command: swapoff -a
@@ -695,7 +722,7 @@
       environment:
         DEBIAN_FRONTEND: noninteractive
 
-    - name: Pin kubelet, kubeadm, and kubectl to their installed version
+    - name: Pin kubelet, kubeadm, kubectl, and containerd.io to their installed version
       ansible.builtin.dpkg_selections:
         name: "{{ item }}"
         selection: hold
@@ -745,15 +772,6 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Configure kubelet node IP in /etc/default/kubelet
-      ansible.builtin.copy:
-        dest: /etc/default/kubelet
-        content: |
-          KUBELET_EXTRA_ARGS="--node-ip={{ static_ip.split('/')[0] }}"
-        owner: root
-        group: root
-        mode: "0644"
-
     - name: Restart and enable containerd and kubelet services
       ansible.builtin.systemd:
         name: "{{ item }}"
@@ -764,6 +782,9 @@
         - containerd.service
         - kubelet.service
         - iscsid.service
+
+    # - name: Apply any pending containerd/kubelet restart before continuing
+    #   ansible.builtin.meta: flush_handlers
 
     - name: Pull kubeadm container images
       ansible.builtin.command: kubeadm config images pull
@@ -782,7 +803,7 @@
         timeout: 60
 
 - name: Initialize Kubernetes control plane on first master node
-  hosts: k8s_masters[0]
+  hosts: "{{ groups['k8s_masters'][0] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
@@ -805,15 +826,64 @@
         path: /etc/kubernetes/admin.conf
       register: k8s_admin_conf
 
+    - name: Resolve NAT network interface name (for kube-vip)
+      ansible.builtin.set_fact:
+        vip_interface: "{{ ansible_facts.interfaces | map('extract', ansible_facts) | selectattr('macaddress', 'defined') | selectattr('macaddress', 'equalto', nat_mac) | map(attribute='device') | first }}"
+      when: num_masters > 1
+
+    - name: Ensure /etc/kubernetes/manifests directory exists
+      ansible.builtin.file:
+        path: /etc/kubernetes/manifests
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+
+    - name: Generate kube-vip static pod manifest for HA control-plane endpoint
+      ansible.builtin.shell: |
+        ctr image pull ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+        ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }} kube-vip-manifest-gen \
+          /kube-vip manifest pod \
+          --interface {{ vip_interface }} \
+          --address {{ control_plane_vip }} \
+          --controlplane --services --arp --leaderElection \
+          > /etc/kubernetes/manifests/kube-vip.yaml
+      args:
+        executable: /bin/bash
+        creates: /etc/kubernetes/manifests/kube-vip.yaml
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+      no_log: true
+
+    # kubeadm's admin.conf is not usable until after the control plane
+    # bootstraps (kubeadm >= v1.29); kube-vip's static pod starts from this
+    # manifest before that point, so it must use super-admin.conf instead.
+    - name: Point kube-vip manifest at super-admin.conf during bootstrap
+      ansible.builtin.replace:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        regexp: "path: /etc/kubernetes/admin.conf"
+        replace: "path: /etc/kubernetes/super-admin.conf"
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+
+    # certSANs are stored in kubeadm-config and reused by joining masters, so
+    # list every master's br0 IP here to allow API access over br0.
     - name: Initialize Kubernetes cluster with kubeadm
       ansible.builtin.command: >
         kubeadm init
         --pod-network-cidr={{ pod_network_cidr }}
         --apiserver-advertise-address={{ node_ip }}
-        --apiserver-cert-extra-sans={{ br0_ip.split('/')[0] }}
+        --apiserver-cert-extra-sans={{ groups['k8s_masters'] | map('extract', hostvars, 'br0_ip') | map('regex_replace', '/.*$', '') | join(',') }}
         --node-name={{ vm_name }}
         --service-cidr=10.96.0.0/16
+        {{ ('--control-plane-endpoint=' ~ control_plane_vip ~ ':' ~ control_plane_vip_port ~ ' --upload-certs') if num_masters > 1 else '' }}
       when: not k8s_admin_conf.stat.exists
+
+    - name: Point kube-vip manifest back at admin.conf after bootstrap
+      ansible.builtin.replace:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        regexp: "path: /etc/kubernetes/super-admin.conf"
+        replace: "path: /etc/kubernetes/admin.conf"
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
 
     - name: Create .kube directories for root and {{ admin_user }}
       ansible.builtin.file:
@@ -854,6 +924,17 @@
       failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
       changed_when: "'untainted' in untaint_master.stdout"
 
+    - name: Wait for kube-vip HA endpoint to become reachable
+      ansible.builtin.uri:
+        url: "https://{{ control_plane_vip }}:{{ control_plane_vip_port }}/healthz"
+        validate_certs: false
+        status_code: 200
+      register: vip_healthz_check
+      until: vip_healthz_check.status == 200
+      retries: 20
+      delay: 5
+      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+
     - name: Download Tigera Calico operator manifest
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml"
@@ -862,6 +943,7 @@
 
     - name: Apply Tigera Calico operator manifest
       ansible.builtin.command: kubectl apply --server-side -f /opt/tigera.yaml
+      when: not k8s_admin_conf.stat.exists
 
     - name: Wait for Tigera operator CRDs to become established
       ansible.builtin.command: kubectl get crd installations.operator.tigera.io
@@ -870,6 +952,7 @@
       retries: 20
       delay: 3
       changed_when: false
+      when: not k8s_admin_conf.stat.exists
 
     - name: Download Calico custom resources manifest
       ansible.builtin.get_url:
@@ -877,52 +960,202 @@
         dest: /opt/calico.yaml
         mode: "0644"
 
-    - name: Configure Calico node address auto-detection for cluster NAT network
-      ansible.builtin.replace:
-        path: /opt/calico.yaml
-        regexp: '(?m)^(\s*calicoNetwork:.*$)'
-        replace: "\\1\n    nodeAddressAutodetectionV4:\n      cidrs:\n        - \"{{ (nat_gateway_ip.split('.')[:3] | join('.')) }}.0{{ nat_ip_subnet | default('/24') }}\""
-
-    - name: Configure Pod network CIDR in Calico manifest
+    - name: Update Pod network CIDR in Calico manifest
       ansible.builtin.replace:
         path: /opt/calico.yaml
         regexp: "cidr:.*"
         replace: "cidr: {{ pod_network_cidr }}"
 
+    - name: Disable Calico overlay encapsulation (nodes share one L2 segment)
+      ansible.builtin.replace:
+        path: /opt/calico.yaml
+        regexp: "encapsulation:.*"
+        replace: "encapsulation: None"
+
+    - name: Pin Calico node IP autodetection to the NAT network
+      ansible.builtin.lineinfile:
+        path: /opt/calico.yaml
+        insertafter: "^  calicoNetwork:$"
+        line: "    nodeAddressAutodetectionV4:\n      cidrs:\n      - {{ calico_node_address_cidr }}"
+
     - name: Apply Calico custom resources manifest
       ansible.builtin.command: kubectl apply -f /opt/calico.yaml
+      when: not k8s_admin_conf.stat.exists
 
-- name: Provide kubeadm token
-  hosts: k8s_masters[0]
-  gather_facts: false
-  environment:
-    KUBECONFIG: /etc/kubernetes/admin.conf
-  tasks:
-    - name: Generate kubeadm join command
-      ansible.builtin.command: kubeadm token create --print-join-command
-      register: kubeadm_join_cmd
+    - name: Generate CA certificate hash
+      ansible.builtin.shell: |
+        openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \
+          | openssl rsa -pubin -outform der 2>/dev/null \
+          | openssl dgst -sha256 -hex \
+          | sed 's/^.* //'
+      args:
+        executable: /bin/bash
+      register: ca_cert_hash_cmd
       changed_when: false
+      # no_log: true
 
-    - name: Set join command fact on master host
-      ansible.builtin.set_fact:
-        k8s_join_command: "{{ kubeadm_join_cmd.stdout | trim }}"
+    - name: Create a fresh kubeadm join token
+      ansible.builtin.command: kubeadm token create
+      register: kubeadm_token_cmd
+      changed_when: true
+      # no_log: true
 
-    - name: Save Kubernetes join command on control node
+    # Without a config, kubeadm uses the default-route interface (br0 on masters)
+    # as the local API endpoint instead of the NAT IP.
+    - name: Write kubeadm config pinning the local API endpoint to the NAT IP
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/jointoken.yml"
+        dest: /etc/kubernetes/kubeadm-upload-certs.yaml
         content: |
-          # Kubernetes Cluster Join Credentials
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kind: InitConfiguration
+          localAPIEndpoint:
+            advertiseAddress: {{ node_ip }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: num_masters > 1
+
+    - name: Upload control-plane certificates for HA master joins
+      ansible.builtin.command: kubeadm init phase upload-certs --upload-certs --config /etc/kubernetes/kubeadm-upload-certs.yaml
+      register: upload_certs_cmd
+      changed_when: true
+      # no_log: true
+      when: num_masters > 1
+
+    - name: Extract certificate key from upload-certs output
+      ansible.builtin.set_fact:
+        k8s_certificate_key: "{{ upload_certs_cmd.stdout_lines[-1] | trim }}"
+      # no_log: true
+      when: num_masters > 1
+
+    - name: Set join facts on master host
+      ansible.builtin.set_fact:
+        k8s_ca_cert_hash: "{{ ca_cert_hash_cmd.stdout | trim }}"
+        k8s_join_token: "{{ kubeadm_token_cmd.stdout | trim }}"
+        k8s_certificate_key: "{{ k8s_certificate_key | default('') }}"
+      # no_log: true
+
+    - name: Save Kubernetes join credentials on control node
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/join_token.yml"
+        content: |
+          # Kubernetes Cluster Join Credentials — do not commit, see .gitignore
           k8s_master_ip: "{{ node_ip }}"
-          k8s_join_command: "{{ k8s_join_command }}"
+          k8s_control_plane_endpoint: "{{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (node_ip ~ ':6443') }}"
+          k8s_join_token: "{{ k8s_join_token }}"
+          k8s_ca_cert_hash: "{{ k8s_ca_cert_hash }}"
+          {% if num_masters > 1 %}
+          k8s_certificate_key: "{{ k8s_certificate_key }}"
+          {% endif %}
+          k8s_join_command: "kubeadm join {{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (node_ip ~ ':6443') }} --token {{ k8s_join_token }} --discovery-token-ca-cert-hash sha256:{{ k8s_ca_cert_hash }}"
         mode: "0600"
       delegate_to: localhost
       become: false
-      when: not is_fresh_install
+      no_log: true
+
+- name: Join additional master nodes to Kubernetes cluster as control-plane
+  hosts: "k8s_masters:!{{ groups['k8s_masters'][0] }}"
+  serial: 1
+  gather_facts: false
+  vars:
+    first_master: "{{ groups['k8s_masters'][0] }}"
+  tasks:
+    - name: Check if this master has already joined the cluster
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Resolve NAT network interface name (for kube-vip)
+      ansible.builtin.set_fact:
+        vip_interface: "{{ ansible_facts.interfaces | map('extract', ansible_facts) | selectattr('macaddress', 'defined') | selectattr('macaddress', 'equalto', nat_mac) | map(attribute='device') | first }}"
+      when: not kubelet_conf.stat.exists
+
+    - name: Ensure /etc/kubernetes/manifests directory exists
+      ansible.builtin.file:
+        path: /etc/kubernetes/manifests
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: not kubelet_conf.stat.exists
+
+    - name: Generate kube-vip static pod manifest for HA control-plane endpoint
+      ansible.builtin.shell: |
+        ctr image pull ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+        ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }} kube-vip-manifest-gen \
+          /kube-vip manifest pod \
+          --interface {{ vip_interface }} \
+          --address {{ control_plane_vip }} \
+          --controlplane --services --arp --leaderElection \
+          > /etc/kubernetes/manifests/kube-vip.yaml
+      args:
+        executable: /bin/bash
+        creates: /etc/kubernetes/manifests/kube-vip.yaml
+      when: not kubelet_conf.stat.exists
+
+    - name: Point kube-vip manifest at super-admin.conf during bootstrap
+      ansible.builtin.replace:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        regexp: "path: /etc/kubernetes/admin.conf"
+        replace: "path: /etc/kubernetes/super-admin.conf"
+      when: not kubelet_conf.stat.exists
+
+    - name: Join additional master node to cluster as control-plane
+      ansible.builtin.command: >
+        kubeadm join {{ control_plane_vip }}:{{ control_plane_vip_port }}
+        --token {{ hostvars[first_master]['k8s_join_token'] }}
+        --discovery-token-ca-cert-hash sha256:{{ hostvars[first_master]['k8s_ca_cert_hash'] }}
+        --control-plane
+        --certificate-key {{ hostvars[first_master]['k8s_certificate_key'] }}
+        --apiserver-advertise-address={{ static_ip.split('/')[0] }}
+      when: not kubelet_conf.stat.exists
+      no_log: true
+
+    - name: Point kube-vip manifest back at admin.conf after bootstrap
+      ansible.builtin.replace:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        regexp: "path: /etc/kubernetes/super-admin.conf"
+        replace: "path: /etc/kubernetes/admin.conf"
+      when: not kubelet_conf.stat.exists
+
+    - name: Create .kube directories for root and {{ admin_user }}
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "0755"
+      loop:
+        - { path: "/root/.kube", owner: "root", group: "root" }
+        - {
+            path: "/home/{{ admin_user }}/.kube",
+            owner: "{{ admin_user }}",
+            group: "users",
+          }
+
+    - name: Copy admin.conf to root and {{ admin_user }} kubeconfig
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ item.dest }}"
+        remote_src: true
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "0600"
+      loop:
+        - { dest: "/root/.kube/config", owner: "root", group: "root" }
+        - {
+            dest: "/home/{{ admin_user }}/.kube/config",
+            owner: "{{ admin_user }}",
+            group: "users",
+          }
 
 - name: Join worker nodes to Kubernetes cluster
   hosts: k8s_workers
   serial: 1
   gather_facts: false
+  # vars:
+  #   first_master: "{{ groups['k8s_masters'][0] }}"
+  #   control_plane_endpoint: "{{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (hostvars[first_master]['node_ip'] ~ ':6443') }}"
   tasks:
     - name: Check if node has already joined the cluster
       ansible.builtin.stat:
@@ -930,11 +1163,15 @@
       register: kubelet_conf
 
     - name: Join worker node to Kubernetes cluster
-      ansible.builtin.command: "{{ hostvars[groups['k8s_masters'][0]]['k8s_join_command'] }}"
+      ansible.builtin.command: >
+        kubeadm join {{ (control_plane_vip ~ ':' ~ control_plane_vip_port if num_masters > 1 else hostvars[groups['k8s_masters'][0]]['node_ip'] ~ ':6443') }}
+        --token {{ hostvars[groups['k8s_masters'][0]]['k8s_join_token'] }}
+        --discovery-token-ca-cert-hash sha256:{{ hostvars[groups['k8s_masters'][0]]['k8s_ca_cert_hash'] }}
       when: not kubelet_conf.stat.exists
+      # no_log: true
 
 - name: Verify Kubernetes cluster status
-  hosts: k8s_masters[0]
+  hosts: "{{ groups['k8s_masters'][0] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
