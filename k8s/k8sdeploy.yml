@@ -916,14 +916,6 @@
             group: "users",
           }
 
-    - name: Remove control-plane taint from master node
-      ansible.builtin.command: >
-        kubectl taint nodes {{ vm_name }}
-        node-role.kubernetes.io/control-plane:NoSchedule-
-      register: untaint_master
-      failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
-      changed_when: "'untainted' in untaint_master.stdout"
-
     - name: Wait for kube-vip HA endpoint to become reachable
       ansible.builtin.uri:
         url: "https://{{ control_plane_vip }}:{{ control_plane_vip_port }}/healthz"
@@ -933,7 +925,15 @@
       until: vip_healthz_check.status == 200
       retries: 20
       delay: 5
-      when: num_masters > 1 and not k8s_admin_conf.stat.exists
+      when: num_masters > 1
+
+    - name: Remove control-plane taint from master node
+      ansible.builtin.command: >
+        kubectl taint nodes {{ vm_name }}
+        node-role.kubernetes.io/control-plane:NoSchedule-
+      register: untaint_master
+      failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
+      changed_when: "'untainted' in untaint_master.stdout"
 
     - name: Download Tigera Calico operator manifest
       ansible.builtin.get_url:
@@ -1191,5 +1191,92 @@
 
 - name: Run Kubernetes addons
   import_playbook: addons.yml
+
+- name: Tear down Kubernetes VMs and NAT network
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tags:
+    - never
+    - teardown
+  vars:
+    num_masters: 3
+    num_workers: 3
+    vm_name_prefix: "msksidb13k8sa"
+    nat_network_name: "nat-{{ vm_name_prefix[-4:] }}"
+    teardown_vm_names: []
+    teardown_storage_paths: []
+    target_disk_dir: "/nvme/vms"
+    target_extra_disk_dir: "/data/VMS"
+    uefi_nvram_dir: "/var/lib/libvirt/qemu/nvram"
+  pre_tasks:
+    - name: Build VM names for teardown
+      ansible.builtin.set_fact:
+        teardown_vm_names: "{{ teardown_vm_names + [vm_name_prefix ~ ('%02d' | format(idx + 1))] }}"
+      loop: "{{ range(0, num_masters + num_workers) | list }}"
+      loop_control:
+        loop_var: idx
+
+    - name: Build VM storage paths for teardown
+      ansible.builtin.set_fact:
+        teardown_storage_paths: >-
+          {{ teardown_storage_paths + [
+            target_disk_dir ~ '/' ~ item ~ '.qcow2',
+            target_extra_disk_dir ~ '/' ~ item ~ '_extra.qcow2',
+            uefi_nvram_dir ~ '/' ~ item ~ '_VARS.fd'
+          ] }}
+      loop: "{{ teardown_vm_names }}"
+  tasks:
+    - name: Check which VM domains exist
+      ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item }}"
+      register: teardown_domain_info
+      loop: "{{ teardown_vm_names }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Request graceful shutdown of existing VMs
+      ansible.builtin.command: "virsh -c qemu:///system shutdown {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0
+      register: teardown_shutdown
+      failed_when: "teardown_shutdown.rc != 0 and 'not running' not in teardown_shutdown.stderr | lower"
+      changed_when: teardown_shutdown.rc == 0
+
+    - name: Wait for existing VMs to shut down
+      ansible.builtin.command: "virsh -c qemu:///system domstate {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0
+      register: teardown_vm_state
+      until: "'shut off' in teardown_vm_state.stdout | lower"
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Undefine existing VMs and remove storage and NVRAM
+      ansible.builtin.command: "virsh -c qemu:///system undefine {{ item.item }} --remove-storage --nvram"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0
+      register: teardown_undefine
+      failed_when: "teardown_undefine.rc != 0 and 'domain not found' not in teardown_undefine.stderr | lower"
+      changed_when: teardown_undefine.rc == 0
+
+    - name: Remove leftover VM storage and NVRAM files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ teardown_storage_paths }}"
+
+    - name: Destroy the libvirt NAT network
+      ansible.builtin.command: "virsh -c qemu:///system net-destroy {{ nat_network_name }}"
+      register: teardown_network_destroy
+      failed_when: "teardown_network_destroy.rc != 0 and 'network not found' not in teardown_network_destroy.stderr | lower"
+      changed_when: teardown_network_destroy.rc == 0
+
+    - name: Undefine the libvirt NAT network
+      ansible.builtin.command: "virsh -c qemu:///system net-undefine {{ nat_network_name }}"
+      register: teardown_network_undefine
+      failed_when: "teardown_network_undefine.rc != 0 and 'network not found' not in teardown_network_undefine.stderr | lower"
+      changed_when: teardown_network_undefine.rc == 0
+
 # Required collections on Ansible control node:
 # ansible-galaxy collection install community.libvirt ansible.posix community.general
