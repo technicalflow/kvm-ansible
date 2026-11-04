@@ -803,7 +803,7 @@
         timeout: 60
 
 - name: Initialize Kubernetes control plane on first master node
-  hosts: "{{ groups['k8s_masters'][0] }}"
+  hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
@@ -1054,7 +1054,7 @@
       no_log: true
 
 - name: Join additional master nodes to Kubernetes cluster as control-plane
-  hosts: "k8s_masters:!{{ groups['k8s_masters'][0] }}"
+  hosts: "k8s_masters:!{{ groups.get('k8s_masters', ['localhost'])[0] }}"
   serial: 1
   gather_facts: false
   vars:
@@ -1171,7 +1171,7 @@
       # no_log: true
 
 - name: Verify Kubernetes cluster status
-  hosts: "{{ groups['k8s_masters'][0] }}"
+  hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
