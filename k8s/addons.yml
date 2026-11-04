@@ -137,10 +137,12 @@
                   - matchLabels:
                       node-role.kubernetes.io/control-plane: ""
 
-        - name: Allow control-plane node to announce LoadBalancer IPs
+        # kubeadm sets this label on every control-plane node; MetalLB skips labelled nodes.
+        - name: Allow control-plane nodes to announce LoadBalancer IPs
           ansible.builtin.command: >
-            kubectl label node {{ inventory_hostname }}
+            kubectl label node {{ item }}
             node.kubernetes.io/exclude-from-external-load-balancers-
+          loop: "{{ groups['k8s_masters'] }}"
           changed_when: true
 
         - name: Apply MetalLB IPAddressPool and L2Advertisement configuration

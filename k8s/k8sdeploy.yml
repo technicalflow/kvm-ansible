@@ -71,7 +71,7 @@
     control_plane_vip: "192.168.67.200"
     control_plane_vip_port: 6443
     # Re-check https://github.com/kube-vip/kube-vip/releases before bumping.
-    kube_vip_version: "v1.3.1"
+    kube_vip_version: "v1.2.4"
 
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
@@ -643,7 +643,7 @@
         - br_netfilter
         - overlay
         - iscsi_tcp
-      failed_when: false
+      # failed_when: false
 
     - name: Configure sysctl parameters for Kubernetes
       ansible.builtin.copy:
@@ -849,7 +849,7 @@
           /kube-vip manifest pod \
           --interface {{ vip_interface }} \
           --address {{ control_plane_vip }} \
-          --controlplane --services --arp --leaderElection \
+          --controlplane --services=false --arp --leaderElection \
           > /etc/kubernetes/manifests/kube-vip.yaml
       args:
         executable: /bin/bash
@@ -1025,13 +1025,13 @@
       ansible.builtin.command: kubeadm init phase upload-certs --upload-certs --config /etc/kubernetes/kubeadm-upload-certs.yaml
       register: upload_certs_cmd
       changed_when: true
-      # no_log: true
+      no_log: true
       when: num_masters > 1
 
     - name: Extract certificate key from upload-certs output
       ansible.builtin.set_fact:
         k8s_certificate_key: "{{ upload_certs_cmd.stdout_lines[-1] | trim }}"
-      # no_log: true
+      no_log: true
       when: num_masters > 1
 
     - name: Set join facts on master host
@@ -1039,7 +1039,7 @@
         k8s_ca_cert_hash: "{{ ca_cert_hash_cmd.stdout | trim }}"
         k8s_join_token: "{{ kubeadm_token_cmd.stdout | trim }}"
         k8s_certificate_key: "{{ k8s_certificate_key | default('') }}"
-      # no_log: true
+      no_log: true
 
     - name: Save Kubernetes join credentials on control node
       ansible.builtin.copy:
@@ -1085,7 +1085,7 @@
         --certificate-key {{ hostvars[first_master]['k8s_certificate_key'] }}
         --apiserver-advertise-address={{ static_ip.split('/')[0] }}
       when: not kubelet_conf.stat.exists
-      no_log: true
+      # no_log: true
 
     - name: Generate kube-vip static pod manifest for HA control-plane endpoint
       ansible.builtin.shell: |
@@ -1094,7 +1094,7 @@
           /kube-vip manifest pod \
           --interface {{ vip_interface }} \
           --address {{ control_plane_vip }} \
-          --controlplane --services --arp --leaderElection \
+          --controlplane --services=false --arp --leaderElection \
           > /etc/kubernetes/manifests/kube-vip.yaml
       args:
         executable: /bin/bash
@@ -1168,10 +1168,11 @@
       register: kubectl_get_nodes
       changed_when: false
 
-    - name: Remove control-plane taint
+    - name: Remove control-plane taint from all masters
       ansible.builtin.command: >
-        kubectl taint nodes {{ inventory_hostname }}
+        kubectl taint nodes {{ item }}
         node-role.kubernetes.io/control-plane:NoSchedule-
+      loop: "{{ groups['k8s_masters'] }}"
       register: untaint_master
       until: "untaint_master.rc == 0 or 'not found' in untaint_master.stderr | lower"
       retries: 12
