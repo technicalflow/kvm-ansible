@@ -23,15 +23,6 @@
     longhorn_volume_size: "8Gi"
 
   tasks:
-    - name: Skip host — already provisioned
-      when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
-        - name: End host
-          ansible.builtin.meta: end_host
-
     # -------------------------------------------------------------------------
     # 1. Install Helm
     # -------------------------------------------------------------------------

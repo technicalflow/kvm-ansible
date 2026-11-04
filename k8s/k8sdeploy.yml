@@ -61,6 +61,7 @@
     k8s_version: "v1.37"
     pod_network_cidr: "172.21.0.0/16"
     calico_version: "v3.32.1"
+    remove_master_taint: true
     timezone: "Europe/Warsaw"
 
     # HA control-plane endpoint, fronted by kube-vip (ARP mode) whenever
@@ -381,6 +382,7 @@
         control_plane_vip: "{{ control_plane_vip }}"
         control_plane_vip_port: "{{ control_plane_vip_port }}"
         kube_vip_version: "{{ kube_vip_version }}"
+        remove_master_taint: "{{ remove_master_taint }}"
         is_fresh_install: "{{ is_fresh_install_map[item.vm_name] }}"
       loop: "{{ vms }}"
       loop_control:
@@ -927,14 +929,6 @@
       delay: 5
       when: num_masters > 1
 
-    - name: Remove control-plane taint from master node
-      ansible.builtin.command: >
-        kubectl taint nodes {{ vm_name }}
-        node-role.kubernetes.io/control-plane:NoSchedule-
-      register: untaint_master
-      failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
-      changed_when: "'untainted' in untaint_master.stdout"
-
     - name: Download Tigera Calico operator manifest
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml"
@@ -1184,6 +1178,18 @@
       ansible.builtin.command: kubectl get nodes -o wide
       register: kubectl_get_nodes
       changed_when: false
+
+    - name: Remove control-plane taint
+      ansible.builtin.command: >
+        kubectl taint nodes {{ inventory_hostname }}
+        node-role.kubernetes.io/control-plane:NoSchedule-
+      register: untaint_master
+      until: "untaint_master.rc == 0 or 'not found' in untaint_master.stderr | lower"
+      retries: 12
+      delay: 5
+      failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr | lower"
+      changed_when: "'untainted' in untaint_master.stdout"
+      when: remove_master_taint | bool
 
     - name: Display Kubernetes cluster nodes
       ansible.builtin.debug:
