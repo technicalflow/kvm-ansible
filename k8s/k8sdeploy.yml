@@ -1241,6 +1241,8 @@
       register: teardown_shutdown
       failed_when: "teardown_shutdown.rc != 0 and 'not running' not in teardown_shutdown.stderr | lower"
       changed_when: teardown_shutdown.rc == 0
+      loop_control:
+        pause: 10
 
     - name: Wait for existing VMs to shut down
       ansible.builtin.command: "virsh -c qemu:///system domstate {{ item.item }}"
@@ -1251,8 +1253,6 @@
       retries: 50
       delay: 2
       changed_when: false
-      loop_control:
-        pause: 10
 
     - name: Undefine existing VMs
       ansible.builtin.command: "virsh -c qemu:///system undefine {{ item.item }} --remove-all-storage --nvram"

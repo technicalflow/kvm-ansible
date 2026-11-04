@@ -105,10 +105,18 @@
               {{
                 ansible_facts.interfaces
                 | map('extract', ansible_facts)
+                | selectattr('macaddress', 'defined')
                 | selectattr('macaddress', 'equalto', br0_mac)
                 | map(attribute='device')
                 | first
               }}
+
+        - name: Verify public network interface was found
+          ansible.builtin.assert:
+            that:
+              - metallb_interface is defined
+              - metallb_interface | length > 0
+            fail_msg: "Could not identify the public br0 interface for MAC {{ br0_mac }}"
 
         - name: Create MetalLB IPAddressPool and L2Advertisement manifest
           ansible.builtin.copy:
