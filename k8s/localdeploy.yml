@@ -4,41 +4,46 @@
   serial: 1
   become: true
   vars:
+    vms: []
     # Number of master (must be 1) and worker VMs to provision
     num_masters: 1
     num_workers: 2
 
     # VM naming — nodes are named <vm_name_prefix><zero-padded index>
-    vm_name_prefix: "mskladb13k8s"
+    vm_name_prefix: "mskladb13k8ss"
 
     # Dedicated NAT network (192.168.63.0/24) for all Kubernetes nodes
-    nat_network_name: "k8s-nat"
-    nat_bridge_name: "virbr-k8s"
-    nat_gateway_ip: "192.168.63.1"
+    nat_network_name: "nat-{{ vm_name_prefix[-4:] }}"
+    nat_bridge_name: "virbr-{{ vm_name_prefix[-4:] }}"
+    nat_gateway_ip: "192.168.65.1"
     nat_netmask: "255.255.255.0"
     nat_ip_subnet: "/24"
+    nat_mac_prefix: "52:54:00:63:10"
 
     # Host bridge (br0) network settings for second adapter on master nodes
     br0_bridge_name: "br0"
     br0_ip_base: "192.168.50.237/23"
     br0_gateway_ip: "192.168.50.250"
+    br0_mac_prefix: "52:54:00:50:10"
     dns_servers:
+      - "9.9.9.9"
       - "192.168.50.242"
-      - "192.168.50.250"
 
     # Master VM resources (from Vagrantfile: 4 CPUs, 4096 MB)
     master_disk_size: "32G"
+    master_extra_disk_size: "30G"
     master_vm_vcpus: 4
-    master_vm_memory_kb: 4194304 # 4096 MB
+    master_vm_memory_kb: 2097152 # 2048 MB
 
     # Worker VM resources (from Vagrantfile: 4 CPUs, 2048 MB)
     worker_disk_size: "32G"
+    worker_extra_disk_size: "30G"
     worker_vm_vcpus: 4
     worker_vm_memory_kb: 2097152 # 2048 MB
 
     # Kubernetes settings
     k8s_version: "v1.37"
-    pod_network_cidr: "172.20.0.0/16"
+    pod_network_cidr: "172.22.0.0/16"
     calico_version: "v3.32.1"
     timezone: "Europe/Warsaw"
 
@@ -47,12 +52,11 @@
     vm_autostart: false
 
     target_disk_dir: "/nvme/vms"
+    target_extra_disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
     emulator_path: "{{ '/usr/bin/qemu-system-x86_64' if ansible_os_family == 'Debian' else '/usr/libexec/qemu-kvm' }}"
-
-    vms: []
 
   pre_tasks:
     - name: Validate master node count
@@ -74,11 +78,12 @@
               'static_ip': (nat_gateway_ip.split('.')[:3] | join('.')) ~ '.' ~
                            (((nat_gateway_ip.split('.')[3] | int) + idx + 1) | string) ~ nat_ip_subnet,
               'br0_ip': br0_ip_base if idx < num_masters else '',
-              'nat_mac': '52:54:00:63:00:' ~ ('%02x' | format(idx + 2)),
-              'br0_mac': '52:54:00:50:00:' ~ ('%02x' | format(idx + 2)),
-              'disk_size':    master_disk_size    if idx < num_masters else worker_disk_size,
-              'vm_vcpus':     master_vm_vcpus     if idx < num_masters else worker_vm_vcpus,
-              'vm_memory_kb': master_vm_memory_kb if idx < num_masters else worker_vm_memory_kb
+              'nat_mac': nat_mac_prefix ~ ':' ~ ('%02x' | format(idx + 2)),
+              'br0_mac': br0_mac_prefix ~ ':' ~ ('%02x' | format(idx + 2)),
+              'disk_size':       master_disk_size       if idx < num_masters else worker_disk_size,
+              'extra_disk_size': master_extra_disk_size if idx < num_masters else worker_extra_disk_size,
+              'vm_vcpus':        master_vm_vcpus        if idx < num_masters else worker_vm_vcpus,
+              'vm_memory_kb':    master_vm_memory_kb    if idx < num_masters else worker_vm_memory_kb
             }]
           }}
       loop: "{{ range(0, num_masters + num_workers) | list }}"
@@ -141,13 +146,16 @@
         group: root
         mode: "0755"
 
-    - name: Ensure target disk directory exists
+    - name: Ensure target disk directories exist
       ansible.builtin.file:
-        path: "{{ target_disk_dir }}"
+        path: "{{ item }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
+      loop:
+        - "{{ target_disk_dir }}"
+        - "{{ target_extra_disk_dir }}"
 
     - name: Check if VM domains exist in libvirt
       ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item.vm_name }}"
@@ -160,6 +168,15 @@
       ansible.builtin.set_fact:
         is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
       loop: "{{ virsh_dominfo.results }}"
+
+    - name: End play early if all VMs are already provisioned
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All VMs ({{ is_fresh_install_map.keys() | list | join(', ') }}) are already defined in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
@@ -183,6 +200,18 @@
       ansible.builtin.command: "qemu-img resize {{ target_disk_dir }}/{{ item.item.vm_name }}.qcow2 {{ item.item.disk_size }}"
       changed_when: not item.stat.exists
       loop: "{{ destination_disks.results }}"
+      when: not item.stat.exists
+
+    - name: Check if destination extra disks already exist
+      ansible.builtin.stat:
+        path: "{{ target_extra_disk_dir }}/{{ item.vm_name }}_extra.qcow2"
+      loop: "{{ vms }}"
+      register: destination_extra_disks
+
+    - name: Create extra disk images for VMs
+      ansible.builtin.command: "qemu-img create -f qcow2 {{ target_extra_disk_dir }}/{{ item.item.vm_name }}_extra.qcow2 {{ item.item.extra_disk_size }}"
+      changed_when: not item.stat.exists
+      loop: "{{ destination_extra_disks.results }}"
       when: not item.stat.exists
 
     - name: Define VM domains in libvirt
@@ -212,7 +241,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -229,6 +258,11 @@
                 <driver name='qemu' type='qcow2' cache='writeback'/>
                 <source file='{{ target_disk_dir }}/{{ item.vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
+              </disk>
+              <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='writeback'/>
+                <source file='{{ target_extra_disk_dir }}/{{ item.vm_name }}_extra.qcow2'/>
+                <target dev='vdb' bus='virtio'/>
               </disk>
               {% if item.is_master %}
               <interface type='bridge'>
@@ -248,7 +282,7 @@
               <channel type='unix'>
                 <source mode='bind'/>
                 <target type='virtio' name='org.qemu.guest_agent.0'/>
-                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
               </channel>
               <serial type='pty'>
                 <target type='isa-serial' port='0'>
@@ -282,7 +316,7 @@
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
       register: agent_ready
       until: agent_ready.rc == 0
-      retries: 30
+      retries: 20
       delay: 3
       changed_when: false
       loop: "{{ vms }}"
@@ -295,11 +329,14 @@
           - "{{ 'k8s_masters' if item.is_master else 'k8s_workers' }}"
         vm_name: "{{ item.vm_name }}"
         is_master: "{{ item.is_master }}"
+        num_masters: "{{ num_masters }}"
+        num_workers: "{{ num_workers }}"
         static_ip: "{{ item.static_ip }}"
         br0_ip: "{{ item.br0_ip }}"
         nat_mac: "{{ item.nat_mac }}"
         br0_mac: "{{ item.br0_mac }}"
         disk_size: "{{ item.disk_size }}"
+        extra_disk_size: "{{ item.extra_disk_size }}"
         br0_bridge_name: "{{ br0_bridge_name }}"
         nat_network_name: "{{ nat_network_name }}"
         nat_gateway_ip: "{{ nat_gateway_ip }}"
@@ -311,6 +348,7 @@
         calico_version: "{{ calico_version }}"
         timezone: "{{ timezone }}"
         ansible_connection: community.libvirt.libvirt_qemu
+        ansible_libvirt_uri: "qemu:///system"
         admin_user: "{{ admin_user }}"
         ansible_user: "root"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
@@ -357,6 +395,19 @@
           register: growpart_result
           changed_when: "'CHANGED' in growpart_result.stdout"
           failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+
+        - name: Format extra disk (/dev/vdb) with ext4 for Longhorn
+          community.general.filesystem:
+            fstype: ext4
+            dev: /dev/vdb
+
+        - name: Mount /dev/vdb to /var/lib/longhorn
+          ansible.posix.mount:
+            path: /var/lib/longhorn
+            src: /dev/vdb
+            fstype: ext4
+            opts: defaults
+            state: mounted
 
         - name: Set timezone to {{ timezone }}
           ansible.builtin.command: "timedatectl set-timezone {{ timezone }}"
@@ -444,7 +495,7 @@
             mode: "0644"
           when: is_master
 
-        - name: Configure static IP on NAT adapter (192.168.63.0/24) in systemd-networkd
+        - name: Configure static IP on NAT adapter in systemd-networkd
           ansible.builtin.copy:
             dest: /etc/systemd/network/10-k8s-nat.network
             content: |
@@ -473,16 +524,16 @@
             enabled: true
             state: restarted
 
-        - name: Ensure DNS servers in /etc/resolv.conf
-          ansible.builtin.copy:
-            dest: /etc/resolv.conf
-            content: |
-              {% for dns in dns_servers %}
-              nameserver {{ dns }}
-              {% endfor %}
-            owner: root
-            group: root
-            mode: "0644"
+        # - name: Ensure DNS servers in /etc/resolv.conf
+        #   ansible.builtin.copy:
+        #     dest: /etc/resolv.conf
+        #     content: |
+        #       {% for dns in dns_servers %}
+        #       nameserver {{ dns }}
+        #       {% endfor %}
+        #     owner: root
+        #     group: root
+        #     mode: "0644"
 
         - name: Display VM Hostname and IP address summary
           ansible.builtin.debug:
@@ -513,7 +564,6 @@
         upgrade: dist
         update_cache: true
 
-
     - name: Ensure baseline and Kubernetes prerequisite packages are installed
       ansible.builtin.apt:
         name:
@@ -527,8 +577,13 @@
           - gpg
           - ethtool
           - jq
+          - open-iscsi
+          - nfs-common
+          - cryptsetup
+          - dmsetup
         state: present
-        update_cache: true
+        autoclean: true
+        autoremove: true
 
     # - name: Disable swap immediately
     #   ansible.builtin.command: swapoff -a
@@ -544,6 +599,7 @@
       ansible.builtin.copy:
         dest: /etc/modules-load.d/k8s.conf
         content: |
+          iscsi_tcp
           br_netfilter
           overlay
         owner: root
@@ -557,6 +613,7 @@
       loop:
         - br_netfilter
         - overlay
+        - iscsi_tcp
       failed_when: false
 
     - name: Configure sysctl parameters for Kubernetes
@@ -608,16 +665,35 @@
         group: root
         mode: "0644"
 
-    - name: Install kubelet, kubeadm, kubectl, containerd, and socat
+    - name: Download and dearmor Docker APT repository GPG key
+      ansible.builtin.shell: |
+        curl -fsSL "https://download.docker.com/linux/debian/gpg" \
+          | gpg --dearmor --yes -o /etc/apt/keyrings/docker-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/docker-apt-keyring.gpg
+
+    # Kubernetes >= v1.36 requires containerd 2.x; Debian 13 ships 1.7.
+    - name: Add Docker APT repository (containerd.io)
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/docker-apt-keyring.gpg] https://download.docker.com/linux/debian {{ ansible_facts.distribution_release }} stable
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install kubelet, kubeadm, kubectl, containerd 2, and socat
       ansible.builtin.apt:
         name:
           - kubelet
           - kubeadm
           - kubectl
-          - containerd
+          - containerd.io=2.*
           - socat
         state: present
         update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     - name: Pin kubelet, kubeadm, and kubectl to their installed version
       ansible.builtin.dpkg_selections:
@@ -627,6 +703,7 @@
         - kubelet
         - kubeadm
         - kubectl
+        - containerd.io
 
     - name: Create CNI symlink for metrics server tools
       ansible.builtin.file:
@@ -643,18 +720,27 @@
         group: root
         mode: "0755"
 
+    # Overwrites the packaged config, which disables the CRI plugin.
+    # Config v3: keys may be absent from the defaults, so replace rather than edit.
     - name: Generate /etc/containerd/config.toml
       ansible.builtin.shell: |
+        set -euo pipefail
         containerd config default > /etc/containerd/config.toml
-        sed -i 's/SystemdCgroup \?= \?false/SystemdCgroup = true/' /etc/containerd/config.toml
+        sed -i -e '/^\s*SystemdCgroup\s*=/d' -e '/^\s*sandbox\s*=/d' /etc/containerd/config.toml
       args:
         executable: /bin/bash
       changed_when: true
 
     - name: Configure /etc/containerd/config.toml
       ansible.builtin.shell: |
+        set -euo pipefail
         PAUSE_IMAGE=$(kubeadm config images list | grep pause)
-        sed -i "s|sandbox_image = \".*\"|sandbox_image = \"${PAUSE_IMAGE}\"|g" /etc/containerd/config.toml
+        sed -i \
+          -e '/\.runtimes\.runc\.options\]$/a SystemdCgroup = true' \
+          -e "/\.pinned_images\]$/a sandbox = '${PAUSE_IMAGE}'" \
+          /etc/containerd/config.toml
+        grep -qF "sandbox = '${PAUSE_IMAGE}'" /etc/containerd/config.toml
+        grep -q '^SystemdCgroup = true$' /etc/containerd/config.toml
       args:
         executable: /bin/bash
       changed_when: true
@@ -677,10 +763,23 @@
       loop:
         - containerd.service
         - kubelet.service
+        - iscsid.service
 
     - name: Pull kubeadm container images
       ansible.builtin.command: kubeadm config images pull
       changed_when: true
+
+    - name: Reboot VM to apply changes
+      ansible.builtin.command: systemctl reboot
+      async: 1
+      poll: 0
+      changed_when: true
+
+    - name: Wait for VM to become reachable after reboot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 60
 
 - name: Initialize Kubernetes control plane on first master node
   hosts: k8s_masters[0]
@@ -713,6 +812,7 @@
         --apiserver-advertise-address={{ node_ip }}
         --apiserver-cert-extra-sans={{ br0_ip.split('/')[0] }}
         --node-name={{ vm_name }}
+        --service-cidr=10.96.0.0/16
       when: not k8s_admin_conf.stat.exists
 
     - name: Create .kube directories for root and {{ admin_user }}
@@ -745,6 +845,14 @@
             owner: "{{ admin_user }}",
             group: "users",
           }
+
+    - name: Remove control-plane taint from master node
+      ansible.builtin.command: >
+        kubectl taint nodes {{ vm_name }}
+        node-role.kubernetes.io/control-plane:NoSchedule-
+      register: untaint_master
+      failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
+      changed_when: "'untainted' in untaint_master.stdout"
 
     - name: Download Tigera Calico operator manifest
       ansible.builtin.get_url:
@@ -809,6 +917,7 @@
         mode: "0600"
       delegate_to: localhost
       become: false
+      when: not is_fresh_install
 
 - name: Join worker nodes to Kubernetes cluster
   hosts: k8s_workers
@@ -842,5 +951,8 @@
     - name: Display Kubernetes cluster nodes
       ansible.builtin.debug:
         var: kubectl_get_nodes.stdout_lines
+
+- name: Run Kubernetes addons
+  import_playbook: addons.yml
 # Required collections on Ansible control node:
 # ansible-galaxy collection install community.libvirt ansible.posix community.general

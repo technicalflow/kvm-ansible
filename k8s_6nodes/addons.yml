@@ -1,0 +1,275 @@
+---
+- name: Provision Helm, MetalLB, Metrics Server, Traefik, and Longhorn
+  hosts: "{{ groups['k8s_masters'][0] }}"
+  gather_facts: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  vars:
+    INSTALLHELM: true
+    INSTALLMETALLB: true
+    INSTALLMETRICSSERVER: true
+    INSTALLTRAEFIK: true
+    INSTALLLONGHORN: true
+
+    metallb_version: "v0.14.9"
+    metallb_ip_range: "192.168.50.120/29"
+    metrics_server_version: "v0.7.2"
+    traefik_namespace: "traefik"
+    longhorn_namespace: "longhorn-system"
+    longhorn_replica_count: "{{ (num_masters | int) + (num_workers | int) }}"
+    longhorn_data_path: "/var/lib/longhorn"
+    longhorn_volume_name: "longhorn-vol"
+    longhorn_volume_namespace: "default"
+    longhorn_volume_size: "8Gi"
+
+  tasks:
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    # -------------------------------------------------------------------------
+    # 1. Install Helm
+    # -------------------------------------------------------------------------
+    - name: Install Helm
+      when: INSTALLHELM | bool
+      block:
+        - name: Check if Helm is already installed
+          ansible.builtin.stat:
+            path: /usr/local/bin/helm
+          register: helm_bin
+
+        - name: Download Helm installation script
+          ansible.builtin.get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /opt/get_helm.sh
+            mode: "0700"
+          when: not helm_bin.stat.exists
+
+        - name: Run Helm installation script
+          ansible.builtin.command: /opt/get_helm.sh
+          args:
+            creates: /usr/local/bin/helm
+
+        - name: Add Helm repository
+          ansible.builtin.command: helm repo add stable https://charts.helm.sh/stable
+          changed_when: true
+
+    # -------------------------------------------------------------------------
+    # 2. Install & Configure MetalLB (via Official Manifests)
+    # -------------------------------------------------------------------------
+    - name: Install and configure MetalLB
+      when: INSTALLMETALLB | bool
+      block:
+        - name: Enable strictARP in kube-proxy ConfigMap for MetalLB
+          ansible.builtin.shell: |
+            kubectl get configmap kube-proxy -n kube-system -o yaml \
+              | sed -e "s/strictARP: false/strictARP: true/" \
+              | kubectl apply -f - -n kube-system
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Download MetalLB manifest
+          ansible.builtin.get_url:
+            url: "https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml"
+            dest: /opt/metallb-native.yaml
+            mode: "0644"
+
+        - name: Apply MetalLB manifest
+          ansible.builtin.command: kubectl apply -f /opt/metallb-native.yaml
+          changed_when: true
+
+        - name: Wait for MetalLB controller deployment to become available
+          ansible.builtin.command: >
+            kubectl wait --namespace metallb-system
+            --for=condition=Available deployment/controller
+            --timeout=180s
+          changed_when: false
+
+        - name: Wait for MetalLB speaker pods to become ready
+          ansible.builtin.command: >
+            kubectl wait --namespace metallb-system
+            --for=condition=Ready pod
+            --selector=component=speaker
+            --timeout=180s
+          changed_when: false
+
+        - name: Create MetalLB IPAddressPool and L2Advertisement manifest
+          ansible.builtin.copy:
+            dest: /opt/metallb-config.yaml
+            mode: "0644"
+            content: |
+              apiVersion: metallb.io/v1beta1
+              kind: IPAddressPool
+              metadata:
+                name: br0-pool
+                namespace: metallb-system
+              spec:
+                addresses:
+                  - {{ metallb_ip_range }}
+              ---
+              apiVersion: metallb.io/v1beta1
+              kind: L2Advertisement
+              metadata:
+                name: br0-l2-adv
+                namespace: metallb-system
+              spec:
+                ipAddressPools:
+                  - br0-pool
+                nodeSelectors:
+                  - matchLabels:
+                      node-role.kubernetes.io/control-plane: ""
+
+        - name: Allow control-plane node to announce LoadBalancer IPs
+          ansible.builtin.command: >
+            kubectl label node {{ inventory_hostname }}
+            node.kubernetes.io/exclude-from-external-load-balancers-
+          changed_when: true
+
+        - name: Apply MetalLB IPAddressPool and L2Advertisement configuration
+          ansible.builtin.command: kubectl apply -f /opt/metallb-config.yaml
+          retries: 5
+          delay: 5
+          register: metallb_cfg_apply
+          until: metallb_cfg_apply.rc == 0
+          changed_when: true
+
+    # -------------------------------------------------------------------------
+    # 3. Install Metrics Server (via Official Manifests)
+    # -------------------------------------------------------------------------
+    - name: Install Metrics Server
+      when: INSTALLMETRICSSERVER | bool
+      block:
+        - name: Download Metrics Server manifest
+          ansible.builtin.get_url:
+            url: "https://github.com/kubernetes-sigs/metrics-server/releases/download/{{ metrics_server_version }}/components.yaml"
+            dest: /opt/metrics-server.yaml
+            mode: "0644"
+
+        - name: Enable --kubelet-insecure-tls in Metrics Server manifest
+          ansible.builtin.lineinfile:
+            path: /opt/metrics-server.yaml
+            insertafter: "- --metric-resolution=15s"
+            line: "        - --kubelet-insecure-tls"
+            state: present
+
+        - name: Apply Metrics Server manifest
+          ansible.builtin.command: kubectl apply -f /opt/metrics-server.yaml
+          changed_when: true
+
+        - name: Wait for Metrics Server deployment to become available
+          ansible.builtin.command: >
+            kubectl wait --namespace kube-system
+            --for=condition=Available deployment/metrics-server
+            --timeout=180s
+          changed_when: false
+
+    # -------------------------------------------------------------------------
+    # 4. Install Traefik Ingress Controller (via Helm)
+    # -------------------------------------------------------------------------
+    - name: Install Traefik Ingress Controller
+      when: INSTALLTRAEFIK | bool
+      block:
+        - name: Add Traefik Helm repository
+          ansible.builtin.command: helm repo add traefik https://traefik.github.io/charts --force-update
+          changed_when: true
+
+        - name: Update Helm repositories
+          ansible.builtin.command: helm repo update
+          changed_when: true
+
+        - name: Install or upgrade Traefik Ingress Controller via Helm
+          ansible.builtin.command: >
+            helm upgrade --install traefik traefik/traefik
+            --namespace {{ traefik_namespace }}
+            --create-namespace
+            --wait
+            --timeout 5m
+          changed_when: true
+
+        - name: Get Traefik LoadBalancer service status
+          ansible.builtin.command: kubectl get svc -n {{ traefik_namespace }} -o wide
+          register: traefik_svc
+          changed_when: false
+
+        - name: Display Traefik service details
+          ansible.builtin.debug:
+            var: traefik_svc.stdout_lines
+
+    # -------------------------------------------------------------------------
+    # 5. Install Longhorn Storage (via Helm)
+    # -------------------------------------------------------------------------
+    - name: Install Longhorn Storage
+      when: INSTALLLONGHORN | bool
+      block:
+        - name: Add Longhorn Helm repository
+          ansible.builtin.command: helm repo add longhorn https://charts.longhorn.io --force-update
+          changed_when: true
+
+        - name: Update Helm repositories
+          ansible.builtin.command: helm repo update
+          changed_when: true
+
+        - name: Install or upgrade Longhorn via Helm
+          ansible.builtin.command: >
+            helm upgrade --install longhorn longhorn/longhorn
+            --namespace {{ longhorn_namespace }}
+            --create-namespace
+            --set defaultSettings.defaultReplicaCount={{ longhorn_replica_count }}
+            --set defaultSettings.defaultDataPath={{ longhorn_data_path }}
+            --wait
+            --timeout 10m
+          changed_when: true
+
+        - name: Get Longhorn pods status
+          ansible.builtin.command: kubectl get pods -n {{ longhorn_namespace }} -o wide
+          register: longhorn_pods
+          changed_when: false
+
+        - name: Display Longhorn pods status
+          ansible.builtin.debug:
+            var: longhorn_pods.stdout_lines
+
+        - name: Create Longhorn PersistentVolumeClaim manifest
+          ansible.builtin.copy:
+            dest: /opt/longhorn-pvc.yaml
+            mode: "0644"
+            content: |
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: {{ longhorn_volume_name }}
+                namespace: {{ longhorn_volume_namespace }}
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                storageClassName: longhorn
+                resources:
+                  requests:
+                    storage: {{ longhorn_volume_size }}
+
+        - name: Apply Longhorn PersistentVolumeClaim manifest
+          ansible.builtin.command: kubectl apply -f /opt/longhorn-pvc.yaml
+          changed_when: true
+
+        - name: Wait for Longhorn PVC to become Bound
+          ansible.builtin.command: >
+            kubectl wait --namespace {{ longhorn_volume_namespace }}
+            --for=jsonpath='{.status.phase}'=Bound
+            pvc/{{ longhorn_volume_name }}
+            --timeout=180s
+          changed_when: false
+
+        - name: Get Longhorn PVC status
+          ansible.builtin.command: kubectl get pvc {{ longhorn_volume_name }} -n {{ longhorn_volume_namespace }} -o wide
+          register: longhorn_pvc
+          changed_when: false
+
+        - name: Display Longhorn PVC status
+          ansible.builtin.debug:
+            var: longhorn_pvc.stdout_lines
