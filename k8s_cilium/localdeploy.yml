@@ -10,7 +10,7 @@
     num_workers: 2
 
     # VM naming — nodes are named <vm_name_prefix><zero-padded index>
-    vm_name_prefix: "mskladb13k8st"
+    vm_name_prefix: "mskladb13k8sc"
     extra_disk: true
 
     # Dedicated NAT network for all Kubernetes nodes
@@ -19,13 +19,13 @@
     nat_net: "192.168.63" # First three octets; a /24 is assumed
     nat_prefix: 24
     nat_gateway_ip: "{{ nat_net }}.1"
-    nat_mac_prefix: "52:54:00:63:10"
+    nat_mac_prefix: "52:54:00:63:22"
 
     # Host bridge (br0) network settings for second adapter on master nodes
     br0_bridge_name: "br0"
-    br0_ip_base: "192.168.50.110/23"
+    br0_ip_base: "192.168.50.237/23"
     br0_gateway_ip: "192.168.50.250"
-    br0_mac_prefix: "52:54:00:50:10"
+    br0_mac_prefix: "52:54:00:50:22"
     dns_servers:
       - "9.9.9.9"
       - "192.168.50.242"
@@ -44,7 +44,7 @@
 
     # Kubernetes settings
     k8s_version: "v1.36"
-    pod_network_cidr: "172.21.0.0/16"
+    pod_network_cidr: "172.22.0.0/16"
     cilium_version: "1.20.4"
     cilium_cli_version: "v0.20.2"
     timezone: "Europe/Warsaw"
@@ -356,8 +356,8 @@
         timezone: "{{ timezone }}"
         ansible_connection: community.libvirt.libvirt_qemu
         ansible_libvirt_uri: "qemu:///system"
+        # ansible_user: "root"
         admin_user: "{{ admin_user }}"
-        ansible_user: "root"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
         is_fresh_install: "{{ is_fresh_install_map[item.vm_name] }}"
       loop: "{{ vms }}"
@@ -369,9 +369,9 @@
   tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
-        delay: 5
+        delay: 1
         sleep: 5
-        timeout: 60
+        timeout: 30
 
     - name: Skip host — already provisioned
       when: not is_fresh_install
@@ -788,9 +788,20 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 12
         sleep: 5
         timeout: 60
+
+    - name: Wait for node services after reboot
+      ansible.builtin.command: systemctl is-active {{ item }}
+      register: node_service_status
+      until: node_service_status.rc == 0 and node_service_status.stdout == 'active'
+      retries: 30
+      delay: 2
+      changed_when: false
+      loop:
+        - containerd.service
+        - iscsid.service
 
 - name: Initialize Kubernetes control plane on first master node
   hosts: k8s_masters[0]
@@ -828,36 +839,31 @@
         --service-cidr=10.96.0.0/16
       when: not k8s_admin_conf.stat.exists
 
-    - name: Create .kube directories for root and {{ admin_user }}
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: directory
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
-        mode: "0755"
-      loop:
-        - { path: "/root/.kube", owner: "root", group: "root" }
-        - {
-            path: "/home/{{ admin_user }}/.kube",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
+    - name: Wait for kubelet after control-plane bootstrap
+      ansible.builtin.command: systemctl is-active kubelet.service
+      register: bootstrapped_kubelet_status
+      until: bootstrapped_kubelet_status.rc == 0 and bootstrapped_kubelet_status.stdout == 'active'
+      retries: 30
+      delay: 2
+      changed_when: false
+      when: not k8s_admin_conf.stat.exists
 
-    - name: Copy admin.conf to root and {{ admin_user }} kubeconfig
+    - name: Create .kube directories for admin user
+      ansible.builtin.file:
+        path: "/home/{{ admin_user }}/.kube"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "users"
+        mode: "0755"
+
+    - name: Copy admin.conf for admin user kubeconfig
       ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
-        dest: "{{ item.dest }}"
+        dest: "/home/{{ admin_user }}/.kube/config"
         remote_src: true
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
+        owner: "{{ admin_user }}"
+        group: "users"
         mode: "0600"
-      loop:
-        - { dest: "/root/.kube/config", owner: "root", group: "root" }
-        - {
-            dest: "/home/{{ admin_user }}/.kube/config",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
 
     - name: Remove control-plane taint from master node
       ansible.builtin.command: >

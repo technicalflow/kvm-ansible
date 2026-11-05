@@ -372,7 +372,7 @@
         ansible_connection: community.libvirt.libvirt_qemu
         ansible_libvirt_uri: "qemu:///system"
         ansible_libvirt_vm: "{{ item.vm_name }}"
-        ansible_user: "root"
+        # ansible_user: "root"
         admin_user: "{{ admin_user }}"
         ssh_pub_key_file: "{{ ssh_pub_key_file }}"
         calico_node_address_cidr: "{{ calico_node_address_cidr }}"
