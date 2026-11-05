@@ -64,10 +64,8 @@
     remove_master_taint: true
     timezone: "Europe/Warsaw"
 
-    # HA control-plane endpoint, fronted by kube-vip (ARP mode) whenever
-    # num_masters > 1. Must be a free address on the NAT network
-    # (nat_net) — it has to be reachable by workers, which only ever
-    # get a NAT-network NIC, so this cannot live on br0.
+    # HA control-plane endpoint, fronted by kube-vip (ARP mode) whenever num_masters > 1.
+    # Must be a free address on the NAT network
     control_plane_vip: "{{ nat_net }}.200"
     control_plane_vip_port: 6443
     # Re-check https://github.com/kube-vip/kube-vip/releases before bumping.
@@ -642,7 +640,6 @@
         - br_netfilter
         - overlay
         - iscsi_tcp
-      # failed_when: false
 
     - name: Configure sysctl parameters for Kubernetes
       ansible.builtin.copy:
@@ -784,9 +781,6 @@
         - kubelet.service
         - iscsid.service
 
-    # - name: Apply any pending containerd/kubelet restart before continuing
-    #   ansible.builtin.meta: flush_handlers
-
     - name: Pull kubeadm container images
       ansible.builtin.command: kubeadm config images pull
       changed_when: true
@@ -799,7 +793,7 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 12
         sleep: 5
         timeout: 60
 
@@ -1021,6 +1015,23 @@
       changed_when: false
       when: not k8s_admin_conf.stat.exists
 
+    - name: Wait for Calico node DaemonSet to be created
+      ansible.builtin.command: kubectl get daemonset calico-node --namespace calico-system
+      register: calico_daemonset_check
+      until: calico_daemonset_check.rc == 0
+      retries: 30
+      delay: 3
+      changed_when: false
+      when: not k8s_admin_conf.stat.exists
+
+    - name: Wait for Calico node DaemonSet rollout
+      ansible.builtin.command: >
+        kubectl rollout status daemonset/calico-node
+        --namespace calico-system
+        --timeout=120s
+      changed_when: false
+      when: not k8s_admin_conf.stat.exists
+
     - name: Wait for Calico node pods
       ansible.builtin.command: >
         kubectl wait --namespace calico-system
@@ -1045,7 +1056,7 @@
       ansible.builtin.command: kubeadm token create
       register: kubeadm_token_cmd
       changed_when: true
-      # no_log: true
+      no_log: true
 
     # Without a config, kubeadm uses the default-route interface (br0 on masters)
     # as the local API endpoint instead of the NAT IP.
@@ -1081,24 +1092,6 @@
         k8s_join_token: "{{ kubeadm_token_cmd.stdout | trim }}"
         k8s_certificate_key: "{{ k8s_certificate_key | default('') }}"
       no_log: true
-
-    # - name: Save Kubernetes join credentials on control node
-    #   ansible.builtin.copy:
-    #     dest: "{{ playbook_dir }}/jointoken.yml"
-    #     content: |
-    #       # Kubernetes Cluster Join Credentials — do not commit, see .gitignore
-    #       k8s_master_ip: "{{ node_ip }}"
-    #       k8s_control_plane_endpoint: "{{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (node_ip ~ ':6443') }}"
-    #       k8s_join_token: "{{ k8s_join_token }}"
-    #       k8s_ca_cert_hash: "{{ k8s_ca_cert_hash }}"
-    #       {% if num_masters > 1 %}
-    #       k8s_certificate_key: "{{ k8s_certificate_key }}"
-    #       {% endif %}
-    #       k8s_join_command: "kubeadm join {{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (node_ip ~ ':6443') }} --token {{ k8s_join_token }} --discovery-token-ca-cert-hash sha256:{{ k8s_ca_cert_hash }}"
-    #     mode: "0600"
-    #   delegate_to: localhost
-    #   become: false
-    #   no_log: true
 
 - name: Join additional master nodes to Kubernetes cluster as control-plane
   hosts: "k8s_masters:!{{ groups.get('k8s_masters', ['localhost'])[0] }}"
@@ -1150,22 +1143,7 @@
         executable: /bin/bash
         creates: /etc/kubernetes/manifests/kube-vip.yaml
       when: not kubelet_conf.stat.exists
-
-    - name: Wait for additional master node registration
-      ansible.builtin.command: kubectl get node {{ vm_name }}
-      delegate_to: "{{ first_master }}"
-      register: joined_master
-      until: joined_master.rc == 0
-      retries: 60
-      delay: 5
-      changed_when: false
-
-    - name: Wait for additional master node to become Ready
-      ansible.builtin.command: >
-        kubectl wait node/{{ vm_name }}
-        --for=condition=Ready --timeout=300s
-      delegate_to: "{{ first_master }}"
-      changed_when: false
+      # no_log: true
 
     - name: Create .kube directories for root and {{ admin_user }}
       ansible.builtin.file:
@@ -1202,9 +1180,6 @@
   hosts: k8s_workers
   serial: 1
   gather_facts: false
-  # vars:
-  #   first_master: "{{ groups['k8s_masters'][0] }}"
-  #   control_plane_endpoint: "{{ (control_plane_vip ~ ':' ~ control_plane_vip_port) if num_masters > 1 else (hostvars[first_master]['node_ip'] ~ ':6443') }}"
   tasks:
     - name: Check if node has already joined the cluster
       ansible.builtin.stat:
@@ -1228,21 +1203,9 @@
       changed_when: false
       when: not kubelet_conf.stat.exists
 
-    - name: Wait for worker node registration
-      ansible.builtin.command: kubectl get node {{ vm_name }}
-      delegate_to: "{{ groups['k8s_masters'][0] }}"
-      register: joined_worker
-      until: joined_worker.rc == 0
-      retries: 60
-      delay: 5
-      changed_when: false
-
-    - name: Wait for worker node to become Ready
-      ansible.builtin.command: >
-        kubectl wait node/{{ vm_name }}
-        --for=condition=Ready --timeout=120s
-      delegate_to: "{{ groups['k8s_masters'][0] }}"
-      changed_when: false
+    - name: Pause for 3 seconds before proceeding to the next worker node
+      ansible.builtin.pause:
+        seconds: 3
 
 - name: Verify Kubernetes cluster status
   hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
@@ -1279,7 +1242,7 @@
 - name: Run Kubernetes addons
   import_playbook: addons.yml
 
-- name: Tear down Kubernetes VMs and NAT network
+- name: Tear down Kubernetes VMs and NAT network (only run when explicitly requested with --tags teardown)
   hosts: localhost
   become: true
   gather_facts: false

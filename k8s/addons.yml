@@ -203,7 +203,7 @@
             --namespace {{ traefik_namespace }}
             --create-namespace
             --wait
-            --timeout 5m
+            --timeout 2m
           changed_when: true
 
         - name: Get Traefik LoadBalancer service status
@@ -237,26 +237,20 @@
             --set defaultSettings.defaultReplicaCount={{ longhorn_replica_count }}
             --set defaultSettings.defaultDataPath={{ longhorn_data_path }}
             --wait
-            --timeout 10m
+            --timeout 2m
           changed_when: true
 
         - name: Wait for Longhorn manager DaemonSet
           ansible.builtin.command: >
             kubectl rollout status daemonset/longhorn-manager
-            --namespace {{ longhorn_namespace }} --timeout=300s
+            --namespace {{ longhorn_namespace }} --timeout=180s
           changed_when: false
 
-        - name: Wait for Longhorn CSI plugin DaemonSet
-          ansible.builtin.command: >
-            kubectl rollout status daemonset/longhorn-csi-plugin
-            --namespace {{ longhorn_namespace }} --timeout=300s
-          changed_when: false
-
-        - name: Wait for Longhorn driver deployer
-          ansible.builtin.command: >
-            kubectl rollout status deployment/longhorn-driver-deployer
-            --namespace {{ longhorn_namespace }} --timeout=300s
-          changed_when: false
+        # - name: Wait for Longhorn driver deployer
+        #   ansible.builtin.command: >
+        #     kubectl rollout status deployment/longhorn-driver-deployer
+        #     --namespace {{ longhorn_namespace }} --timeout=300s
+        #   changed_when: false
 
         - name: Get Longhorn pods status
           ansible.builtin.command: kubectl get pods -n {{ longhorn_namespace }} -o wide
