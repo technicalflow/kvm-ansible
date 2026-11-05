@@ -11,7 +11,7 @@
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
     static_ip: "192.168.110.210/24"
-    gateway_ip: "192.168.110.253"
+    gateway_ip: "192.168.110.246"
     maas_subnet_cidr: "192.168.110.0/24"
     dhcp_start_ip: "192.168.110.10"
     dhcp_end_ip: "192.168.110.100"

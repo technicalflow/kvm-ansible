@@ -3,7 +3,7 @@
   hosts: localhost
   become: true
   vars:
-    vm_name: "msklavy26netm02"
+    vm_name: "msksivy26netm01"
     vm_memory_kb: 1048576 # 1024 MB
     vm_vcpus: 2
     disk_size: "8G"
@@ -13,8 +13,8 @@
     vm_autostart: false
     timezone: "Europe/Warsaw"
     wan_bridge: "br0"
-    wan_ip: "192.168.50.253/23"
-    lan_ip: "192.168.110.253/24"
+    wan_ip: "192.168.50.246/23"
+    lan_ip: "192.168.110.246/24"
     lan_subnet: "192.168.110.0/24"
     wan_address: "{{ wan_ip.split('/')[0] }}"
     lan_address: "{{ lan_ip.split('/')[0] }}"
@@ -310,7 +310,7 @@
         lines:
           - set interfaces ethernet eth0 address {{ wan_ip }}
           - set protocols static route 0.0.0.0/0 next-hop {{ wan_gateway_ip }}
-          # - set interfaces ethernet eth0 address fd50:cafe::253/64
+          # - set interfaces ethernet eth0 address fd50:cafe::246/64
           - set interfaces ethernet eth0 description WAN
           - set interfaces ethernet eth1 address {{ lan_ip }}
           - set interfaces ethernet eth1 description LAN
