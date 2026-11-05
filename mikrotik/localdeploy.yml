@@ -257,6 +257,7 @@
         ansible_command_timeout: 60
         ansible_host_key_checking: false
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        is_fresh_install: "{{ is_fresh_install }}"
         chr_ip: "{{ chr_ip }}"
         chr_prefix: "{{ chr_prefix }}"
         chr_gateway: "{{ chr_gateway }}"

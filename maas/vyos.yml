@@ -81,7 +81,7 @@
 
     - name: Configure libvirt NAT network autostart
       community.libvirt.virt_net:
-        name: "{{ nat_network_name }}"
+        name: "{{ libvirt_net_name }}"
         autostart: true
 
     - name: Check if VM domain exists in libvirt
