@@ -11,9 +11,9 @@
     INSTALLTRAEFIK: true
     INSTALLLONGHORN: true
 
-    metallb_version: "v0.14.9"
+    metallb_version: "v0.16.2"
     metallb_ip_range: "192.168.50.120/29"
-    metrics_server_version: "v0.7.2"
+    metrics_server_version: "v0.9.1"
     traefik_namespace: "traefik"
     longhorn_namespace: "longhorn-system"
     longhorn_replica_count: "{{ (num_masters | int) + (num_workers | int) }}"
@@ -23,6 +23,15 @@
     longhorn_volume_size: "8Gi"
 
   tasks:
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
     # -------------------------------------------------------------------------
     # 1. Install Helm
     # -------------------------------------------------------------------------
@@ -187,7 +196,7 @@
     # 4. Install Traefik Ingress Controller (via Helm)
     # -------------------------------------------------------------------------
     - name: Install Traefik Ingress Controller
-      when: INSTALLTRAEFIK | bool
+      when: (INSTALLTRAEFIK | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool)
       block:
         - name: Add Traefik Helm repository
           ansible.builtin.command: helm repo add traefik https://traefik.github.io/charts --force-update
@@ -219,7 +228,7 @@
     # 5. Install Longhorn Storage (via Helm)
     # -------------------------------------------------------------------------
     - name: Install Longhorn Storage
-      when: INSTALLLONGHORN | bool
+      when: (INSTALLLONGHORN | bool) and (INSTALLHELM | bool)
       block:
         - name: Add Longhorn Helm repository
           ansible.builtin.command: helm repo add longhorn https://charts.longhorn.io --force-update
@@ -245,12 +254,6 @@
             kubectl rollout status daemonset/longhorn-manager
             --namespace {{ longhorn_namespace }} --timeout=180s
           changed_when: false
-
-        # - name: Wait for Longhorn driver deployer
-        #   ansible.builtin.command: >
-        #     kubectl rollout status deployment/longhorn-driver-deployer
-        #     --namespace {{ longhorn_namespace }} --timeout=300s
-        #   changed_when: false
 
         - name: Get Longhorn pods status
           ansible.builtin.command: kubectl get pods -n {{ longhorn_namespace }} -o wide
