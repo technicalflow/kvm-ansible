@@ -392,9 +392,9 @@
   tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
-        delay: 5
+        delay: 1
         sleep: 5
-        timeout: 60
+        timeout: 30
 
     - name: Skip host — already provisioned
       when: not is_fresh_install
@@ -918,36 +918,22 @@
       changed_when: false
       when: num_masters > 1 and not k8s_admin_conf.stat.exists
 
-    - name: Create .kube directories for root and {{ admin_user }}
+    - name: Create .kube directories for admin user
       ansible.builtin.file:
-        path: "{{ item.path }}"
+        path: "/home/{{ admin_user }}/.kube"
         state: directory
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
+        owner: "{{ admin_user }}"
+        group: "users"
         mode: "0755"
-      loop:
-        - { path: "/root/.kube", owner: "root", group: "root" }
-        - {
-            path: "/home/{{ admin_user }}/.kube",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
 
-    - name: Copy admin.conf to root and {{ admin_user }} kubeconfig
+    - name: Copy admin.conf for admin user kubeconfig
       ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
-        dest: "{{ item.dest }}"
+        dest: "/home/{{ admin_user }}/.kube/config"
         remote_src: true
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
+        owner: "{{ admin_user }}"
+        group: "users"
         mode: "0600"
-      loop:
-        - { dest: "/root/.kube/config", owner: "root", group: "root" }
-        - {
-            dest: "/home/{{ admin_user }}/.kube/config",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
 
     - name: Wait for kube-vip HA endpoint to become reachable
       ansible.builtin.uri:
@@ -1097,8 +1083,6 @@
   hosts: "k8s_masters:!{{ groups.get('k8s_masters', ['localhost'])[0] }}"
   serial: 1
   gather_facts: false
-  vars:
-    first_master: "{{ groups['k8s_masters'][0] }}"
   tasks:
     - name: Check if this master has already joined the cluster
       ansible.builtin.stat:
@@ -1113,10 +1097,10 @@
     - name: Join additional master node to cluster as control-plane
       ansible.builtin.command: >
         kubeadm join {{ control_plane_vip }}:{{ control_plane_vip_port }}
-        --token {{ hostvars[first_master]['k8s_join_token'] }}
-        --discovery-token-ca-cert-hash sha256:{{ hostvars[first_master]['k8s_ca_cert_hash'] }}
+        --token {{ hostvars[groups['k8s_masters'][0]]['k8s_join_token'] }}
+        --discovery-token-ca-cert-hash sha256:{{ hostvars[groups['k8s_masters'][0]]['k8s_ca_cert_hash'] }}
         --control-plane
-        --certificate-key {{ hostvars[first_master]['k8s_certificate_key'] }}
+        --certificate-key {{ hostvars[groups['k8s_masters'][0]]['k8s_certificate_key'] }}
         --apiserver-advertise-address={{ static_ip.split('/')[0] }}
       when: not kubelet_conf.stat.exists
       # no_log: true
@@ -1145,36 +1129,22 @@
       when: not kubelet_conf.stat.exists
       # no_log: true
 
-    - name: Create .kube directories for root and {{ admin_user }}
+    - name: Create .kube directories for admin user
       ansible.builtin.file:
-        path: "{{ item.path }}"
+        path: "/home/{{ admin_user }}/.kube"
         state: directory
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
+        owner: "{{ admin_user }}"
+        group: "users"
         mode: "0755"
-      loop:
-        - { path: "/root/.kube", owner: "root", group: "root" }
-        - {
-            path: "/home/{{ admin_user }}/.kube",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
 
-    - name: Copy admin.conf to root and {{ admin_user }} kubeconfig
+    - name: Copy admin.conf for admin user kubeconfig
       ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
-        dest: "{{ item.dest }}"
+        dest: "/home/{{ admin_user }}/.kube/config"
         remote_src: true
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
+        owner: "{{ admin_user }}"
+        group: "users"
         mode: "0600"
-      loop:
-        - { dest: "/root/.kube/config", owner: "root", group: "root" }
-        - {
-            dest: "/home/{{ admin_user }}/.kube/config",
-            owner: "{{ admin_user }}",
-            group: "users",
-          }
 
 - name: Join worker nodes to Kubernetes cluster
   hosts: k8s_workers
@@ -1292,7 +1262,7 @@
       failed_when: "teardown_shutdown.rc != 0 and 'not running' not in teardown_shutdown.stderr | lower"
       changed_when: teardown_shutdown.rc == 0
       loop_control:
-        pause: 10
+        pause: 5
 
     - name: Wait for existing VMs to shut down
       ansible.builtin.command: "virsh -c qemu:///system domstate {{ item.item }}"
@@ -1301,7 +1271,7 @@
       register: teardown_vm_state
       until: "'shut off' in teardown_vm_state.stdout | lower"
       retries: 50
-      delay: 2
+      delay: 5
       changed_when: false
 
     - name: Undefine existing VMs
