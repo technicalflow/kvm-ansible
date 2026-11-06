@@ -605,6 +605,8 @@
           - nfs-common
           - cryptsetup
           - dmsetup
+          - cri-tools
+          - kubectx
         state: present
         autoclean: true
         autoremove: true
