@@ -12,6 +12,7 @@
     INSTALLMETRICSSERVER: true
     INSTALLTRAEFIK: true
     INSTALLLONGHORN: true
+    PUBLISH_LONGHORN_UI: true
 
     metallb_version: "v0.16.2"
     metallb_ip_range: "192.168.50.128/29"
@@ -281,3 +282,30 @@
         - name: Display Longhorn PVC status
           ansible.builtin.debug:
             var: longhorn_pvc.stdout_lines
+          when: (INSTALLLONGHORN | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool) and (PUBLISH_LONGHORN_UI | bool)
+
+        - name: Load Balancer Service for Longhorn UI
+          when: (PUBLISH_LONGHORN_UI | bool) and (INSTALLLONGHORN | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool)
+          ansible.builtin.copy:
+            dest: /opt/longhorn_lb.yaml
+            mode: "0644"
+            content: |
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: longhorn-frontend-lb
+                namespace: longhorn-system
+              spec:
+                type: LoadBalancer
+                selector:
+                  app: longhorn-ui
+                ports:
+                  - name: http
+                    port: 80
+                    targetPort: 8000
+
+        - name: Apply Load Balancer Service for Longhorn UI
+          ansible.builtin.command: kubectl apply -f /opt/longhorn_lb.yaml
+          retries: 5
+          delay: 1
+          changed_when: true

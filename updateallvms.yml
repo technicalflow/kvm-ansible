@@ -1,0 +1,66 @@
+- name: Update running KVM VMs via QEMU guest agent socket
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: Fetch list of running KVM VMs
+      ansible.builtin.command: virsh -c qemu:///system -q list --state-running --name
+      register: kvm_vms
+      changed_when: false
+
+    - name: Query OS info via QEMU guest agent
+      ansible.builtin.command: >
+        virsh -c qemu:///system qemu-agent-command "{{ item }}" '{"execute":"guest-get-osinfo"}'
+      register: os_info
+      loop: "{{ kvm_vms.stdout_lines | reject('match', '^$') | list }}"
+      failed_when: false
+      changed_when: false
+
+    # 1. Debian & Ubuntu (apt)
+    - name: Update Debian and Ubuntu VMs
+      ansible.builtin.shell: |
+        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
+          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y"]}}'
+      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"(debian|ubuntu)\"') | list }}"
+      loop_control:
+        pause: 20
+      changed_when: true
+
+    # 2. Legacy CentOS 7 (yum)
+    - name: Update CentOS 7 VMs
+      ansible.builtin.shell: |
+        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
+          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "yum update -y"]}}'
+      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"centos\"') | selectattr('stdout', 'search', '\"version-id\":\"7') | list }}"
+      loop_control:
+        pause: 20
+      register: centos7_exec
+      failed_when:
+        - centos7_exec.rc != 0
+        - "'guest-exec has been disabled' not in centos7_exec.stderr"
+      changed_when: centos7_exec.rc == 0
+
+    # 3. Modern EL 8, 9, 10: CentOS Stream, Oracle Linux, Rocky, Alma, RHEL (dnf)
+    - name: Update EL 8+ VMs (CentOS 8/9/10, Oracle Linux 8+, Rocky, Alma, RHEL)
+      ansible.builtin.shell: |
+        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
+          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "dnf update -y"]}}'
+      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"(ol|centos|rhel|rocky|almalinux)\"') | list }}"
+      loop_control:
+        pause: 20
+      when: ((item.stdout | from_json).return['version-id'] | default('0')) | float >= 8
+      register: el_exec
+      failed_when:
+        - el_exec.rc != 0
+        - "'guest-exec has been disabled' not in el_exec.stderr"
+      changed_when: el_exec.rc == 0
+
+    # 4. FreeBSD (pkg)
+    - name: Update FreeBSD VMs
+      ansible.builtin.shell: |
+        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
+          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "env ASSUME_ALWAYS_YES=YES pkg update && env ASSUME_ALWAYS_YES=YES pkg upgrade -y"]}}'
+      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"freebsd\"') | list }}"
+      loop_control:
+        pause: 20
+      changed_when: true
