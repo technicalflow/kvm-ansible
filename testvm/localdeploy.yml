@@ -6,7 +6,7 @@
     vm_name: "mskladb13test02"
     vm_memory_kb: 16777216 # 16384 MB
     vm_vcpus: 4
-    disk_size: "16G"
+    disk_size: "64G"
     admin_user: "madmin"
     ssh_pub_key_file: "/home/madmin/.ssh/ansible.pub"
     vm_autostart: false
@@ -202,6 +202,7 @@
         static_ip: "{{ static_ip }}"
         dns_servers: "{{ dns_servers }}"
         gateway_ip: "{{ gateway_ip }}"
+        network_mtu: "{{ network_mtu }}"
 
     #    - name: Pause for 30 seconds
     #      ansible.builtin.pause:
@@ -452,11 +453,12 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.package:
         name:
-          - mc
           - htop
           - curl
           - wget
           - gnupg
+          - git
+          - ansible
         state: present
       become: yes
 
