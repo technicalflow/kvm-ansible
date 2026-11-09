@@ -4,11 +4,12 @@
   become: true
   vars:
     # Number of worker VMs to provision (managers are node01, node02, node03; workers start at node04)
-    num_workers: 3
-    num_managers: 3 # Must be odd (1, 3, 5…); first num_managers nodes become swarm managers
+    # Values marked &name are reused by the teardown play via *name
+    num_workers: &num_workers 3
+    num_managers: &num_managers 3 # Must be odd (1, 3, 5…); first num_managers nodes become swarm managers
 
     # VM naming — nodes are named <vm_name_prefix><zero-padded index>
-    vm_name_prefix: "mskladb13dswm"
+    vm_name_prefix: &vm_name_prefix "mskladb13dswm"
 
     # Starting IP — node01 gets this IP, last octet incremented per node (180 → node01 .180, node02 .181, …)
     vm_ip_base: "192.168.50.181"
@@ -35,7 +36,7 @@
       - "192.168.50.242"
       - "192.168.50.250"
 
-    disk_dir: "/data/VMS"
+    disk_dir: &disk_dir "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
@@ -628,5 +629,128 @@
     - name: Display Swarm cluster nodes
       ansible.builtin.debug:
         var: docker_node_ls.stdout_lines
+
+- name: Shutdown VMs (only run when explicitly requested with --tags shutdown)
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tags:
+    - never
+    - shutdown
+  vars:
+    num_managers: *num_managers
+    num_workers: *num_workers
+    vm_name_prefix: *vm_name_prefix
+    teardown_vm_names: []
+  pre_tasks:
+    - name: Build VM names for teardown
+      ansible.builtin.set_fact:
+        teardown_vm_names: "{{ teardown_vm_names + [vm_name_prefix ~ ('%02d' | format(idx + 1))] }}"
+      loop: "{{ range(0, num_managers + num_workers) | list }}"
+      loop_control:
+        loop_var: idx
+  tasks:
+    - name: Check which VM domains exist
+      ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item }}"
+      register: teardown_domain_info
+      loop: "{{ teardown_vm_names }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Request graceful shutdown of existing VMs
+      ansible.builtin.command: "virsh -c qemu:///system shutdown {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0 and 'shut off' not in item.stdout
+      register: teardown_shutdown
+      failed_when: "teardown_shutdown.rc != 0 and 'not running' not in teardown_shutdown.stderr | lower"
+      changed_when: teardown_shutdown.rc == 0
+      loop_control:
+        pause: 5
+
+    - name: Wait for existing VMs to shut down
+      ansible.builtin.command: "virsh -c qemu:///system domstate {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0 and 'shut off' not in item.stdout
+      register: teardown_vm_state
+      until: "'shut off' in teardown_vm_state.stdout | lower"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+- name: Tear down VMs (only run when explicitly requested with --tags teardown)
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tags:
+    - never
+    - teardown
+  vars:
+    num_managers: *num_managers
+    num_workers: *num_workers
+    vm_name_prefix: *vm_name_prefix
+    disk_dir: *disk_dir
+    teardown_vm_names: []
+    teardown_storage_paths: []
+    uefi_nvram_dir: "/var/lib/libvirt/qemu/nvram"
+  pre_tasks:
+    - name: Build VM names for teardown
+      ansible.builtin.set_fact:
+        teardown_vm_names: "{{ teardown_vm_names + [vm_name_prefix ~ ('%02d' | format(idx + 1))] }}"
+      loop: "{{ range(0, num_managers + num_workers) | list }}"
+      loop_control:
+        loop_var: idx
+
+    - name: Build VM storage paths for teardown
+      ansible.builtin.set_fact:
+        teardown_storage_paths: >-
+          {{ teardown_storage_paths + [
+            disk_dir ~ '/' ~ item ~ '.qcow2',
+            uefi_nvram_dir ~ '/' ~ item ~ '_VARS.fd'
+          ] }}
+      loop: "{{ teardown_vm_names }}"
+  tasks:
+    - name: Check which VM domains exist
+      ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item }}"
+      register: teardown_domain_info
+      loop: "{{ teardown_vm_names }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Request graceful shutdown of existing VMs
+      ansible.builtin.command: "virsh -c qemu:///system shutdown {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0 and 'shut off' not in item.stdout
+      register: teardown_shutdown
+      failed_when: "teardown_shutdown.rc != 0 and 'not running' not in teardown_shutdown.stderr | lower"
+      changed_when: teardown_shutdown.rc == 0
+      loop_control:
+        pause: 5
+
+    - name: Wait for existing VMs to shut down
+      ansible.builtin.command: "virsh -c qemu:///system domstate {{ item.item }}"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0 and 'shut off' not in item.stdout
+      register: teardown_vm_state
+      until: "'shut off' in teardown_vm_state.stdout | lower"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Undefine existing VMs
+      ansible.builtin.command: "virsh -c qemu:///system undefine {{ item.item }} --remove-all-storage --nvram --managed-save --snapshots-metadata"
+      loop: "{{ teardown_domain_info.results }}"
+      when: item.rc == 0
+      register: teardown_undefine
+      failed_when: "teardown_undefine.rc != 0 and 'domain not found' not in teardown_undefine.stderr | lower"
+      changed_when: teardown_undefine.rc == 0
+      loop_control:
+        pause: 1
+
+    - name: Remove leftover VM storage and NVRAM files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ teardown_storage_paths }}"
+
 # Required collections on Ansible control node:
 # ansible-galaxy collection install community.libvirt ansible.posix community.docker
