@@ -459,6 +459,7 @@
           - gnupg
           - git
           - ansible
+          - nfs-common
         state: present
       become: yes
 
@@ -487,6 +488,22 @@
         - apt-daily-upgrade.timer
         - systemd-timesyncd.service
       failed_when: false
+
+    - name: Ensure mount point directory exists
+      ansible.builtin.file:
+        path: "/data/ISO"
+        state: directory
+        owner: root
+        group: root
+        mode: "755"
+
+    - name: Mount NFS share and add to /etc/fstab
+      ansible.posix.mount:
+        path: "/data/ISO"
+        src: "192.168.50.203:/data/ISO"
+        fstype: "nfs4"
+        opts: "defaults,ro"
+        state: mounted
 
     # - name: Configure KVM for nested virtualization
     #   ansible.builtin.copy:
