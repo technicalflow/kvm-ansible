@@ -47,6 +47,8 @@
     pod_network_cidr: "172.22.0.0/16"
     cilium_version: "1.20.4"
     cilium_cli_version: "v0.20.2"
+    remove_master_taint: true
+
     timezone: "Europe/Warsaw"
 
     admin_user: "madmin"
@@ -590,6 +592,8 @@
           - nfs-common
           - cryptsetup
           - dmsetup
+          - cri-tools
+          - kubectx
         state: present
         autoclean: true
         autoremove: true
@@ -872,6 +876,7 @@
       register: untaint_master
       failed_when: "untaint_master.rc != 0 and 'not found' not in untaint_master.stderr"
       changed_when: "'untainted' in untaint_master.stdout"
+      when: remove_master_taint | bool
 
     - name: Download Cilium CLI
       ansible.builtin.get_url:
@@ -947,7 +952,7 @@
     KUBECONFIG: /etc/kubernetes/admin.conf
   tasks:
     - name: Wait for all nodes to be Ready
-      ansible.builtin.command: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      ansible.builtin.command: kubectl wait --for=condition=Ready nodes --all --timeout=120s
       changed_when: false
 
     - name: Retrieve Kubernetes cluster node list

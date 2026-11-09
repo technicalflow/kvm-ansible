@@ -4,7 +4,6 @@
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
-    # libvirt_qemu runs commands via the guest agent, which sets no HOME.
     HOME: /root
   vars:
     INSTALLHELM: true
@@ -102,6 +101,25 @@
             --timeout=180s
           changed_when: false
 
+        - name: Resolve public network interface
+          ansible.builtin.set_fact:
+            metallb_interface: >-
+              {{
+                ansible_facts.interfaces
+                | map('extract', ansible_facts)
+                | selectattr('macaddress', 'defined')
+                | selectattr('macaddress', 'equalto', br0_mac)
+                | map(attribute='device')
+                | first
+              }}
+
+        - name: Verify public network interface was found
+          ansible.builtin.assert:
+            that:
+              - metallb_interface is defined
+              - metallb_interface | length > 0
+            fail_msg: "Could not identify the public br0 interface for MAC {{ br0_mac }}"
+
         - name: Create MetalLB IPAddressPool and L2Advertisement manifest
           ansible.builtin.copy:
             dest: /opt/metallb-config.yaml
@@ -124,6 +142,8 @@
               spec:
                 ipAddressPools:
                   - br0-pool
+                interfaces:
+                  - {{ metallb_interface }}
                 nodeSelectors:
                   - matchLabels:
                       node-role.kubernetes.io/control-plane: ""
@@ -282,7 +302,6 @@
         - name: Display Longhorn PVC status
           ansible.builtin.debug:
             var: longhorn_pvc.stdout_lines
-          when: (INSTALLLONGHORN | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool) and (PUBLISH_LONGHORN_UI | bool)
 
         - name: Load Balancer Service for Longhorn UI
           when: (PUBLISH_LONGHORN_UI | bool) and (INSTALLLONGHORN | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool)
@@ -309,3 +328,4 @@
           retries: 5
           delay: 1
           changed_when: true
+          when: (PUBLISH_LONGHORN_UI | bool) and (INSTALLLONGHORN | bool) and (INSTALLMETALLB | bool) and (INSTALLHELM | bool)
