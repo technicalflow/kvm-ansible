@@ -342,7 +342,7 @@
       retries: 20
       delay: 3
       changed_when: false
-      become: false
+      # become: false
       loop: "{{ vms }}"
 
     - name: Add new VMs to dynamic inventory
@@ -490,81 +490,94 @@
             mode: "0440"
             validate: /usr/sbin/visudo -cf %s
 
-        - name: Purge existing systemd-networkd configuration directory
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: absent
-
-        - name: Ensure clean systemd-networkd directory exists
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: directory
-            owner: root
-            group: root
-            mode: "0755"
-
-        - name: Configure first adapter (br0) in systemd-networkd on master nodes
-          ansible.builtin.copy:
-            dest: /etc/systemd/network/20-br0.network
-            content: |
-              [Match]
-              MACAddress={{ br0_mac }}
-
-              [Network]
-              Address={{ br0_ip }}
-              {% for dns in dns_servers %}
-              DNS={{ dns }}
-              {% endfor %}
-              IPv6AcceptRA=no
-
-              [Route]
-              Destination=0.0.0.0/0
-              Gateway={{ br0_gateway_ip }}
-              GatewayOnLink=yes
-              Metric=10
-            owner: root
-            group: root
-            mode: "0644"
-          when: is_master
-
-        - name: Configure static IP on NAT adapter in systemd-networkd
-          ansible.builtin.copy:
-            dest: /etc/systemd/network/10-k8s-nat.network
-            content: |
-              [Match]
-              MACAddress={{ nat_mac }}
-
-              [Network]
-              Address={{ static_ip }}
-              {% for dns in dns_servers %}
-              DNS={{ dns }}
-              {% endfor %}
-              IPv6AcceptRA=no
-
-              [Route]
-              Destination=0.0.0.0/0
-              Gateway={{ nat_gateway_ip }}
-              GatewayOnLink=yes
-              Metric={{ '100' if is_master else '10' }}
-            owner: root
-            group: root
-            mode: "0644"
-
-        - name: Restart systemd-networkd
-          ansible.builtin.systemd:
-            name: systemd-networkd
-            enabled: true
-            state: restarted
-
-        - name: Display VM Hostname and IP address summary
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
           ansible.builtin.debug:
-            msg:
-              - "=========================================="
-              - " VM Provisioning Summary"
-              - " Hostname: {{ vm_name }}"
-              - " Role: {{ 'Master' if is_master else 'Worker' }}"
-              - " NAT IP: {{ static_ip }}"
-              - "=========================================="
+            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
+
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure first adapter (br0) in systemd-networkd on master nodes
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/20-br0.network
+        content: |
+          [Match]
+          MACAddress={{ br0_mac }}
+
+          [Network]
+          Address={{ br0_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+          IPv6AcceptRA=no
+
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ br0_gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
+      when: is_master
+
+    - name: Configure static IP on NAT adapter in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-k8s-nat.network
+        content: |
+          [Match]
+          MACAddress={{ nat_mac }}
+
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+          IPv6AcceptRA=no
+
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ nat_gateway_ip }}
+          GatewayOnLink=yes
+          Metric={{ '100' if is_master else '10' }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: true
+        state: restarted
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ vm_name }}"
+          - " Role: {{ 'Master' if is_master else 'Worker' }}"
+          - " NAT IP: {{ static_ip }}"
+          - "=========================================="
 
 - name: Install and configure Kubernetes prerequisites on spawned VMs
   hosts: spawned_vms
