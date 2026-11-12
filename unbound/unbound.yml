@@ -113,13 +113,15 @@
                   do-tcp: yes
                   so-sndbuf: 0
                   so-rcvbuf: 0
-                  msg-cache-size: 32m
-                  rrset-cache-size: 64m
+                  msg-cache-size: 64m
+                  rrset-cache-size: 128m
+                  serve-expired-client-timeout: 1200
                   prefetch: yes
                   prefetch-key: yes
                   serve-expired: yes
                   hide-identity: yes
                   hide-version: yes
+                  aggressive-nsec: yes
                   access-control: {{ network }} allow
                   access-control: 127.0.0.0/8 allow
                   access-control: ::1 allow

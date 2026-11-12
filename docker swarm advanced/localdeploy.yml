@@ -388,6 +388,14 @@
         mode: "0440"
         validate: /usr/sbin/visudo -cf %s
 
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Purge existing systemd-networkd configuration directory
       ansible.builtin.file:
         path: /etc/systemd/network
@@ -524,6 +532,28 @@
         groups: docker
         append: yes
       when: admin_user is defined
+
+    - name: Configure sysctl settings
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/10-kubernetes.conf
+        reload: true
+      loop: "{{ sysctl_settings | dict2items }}"
+      vars:
+        sysctl_settings:
+          net.ipv4.ip_forward: 1
+          net.core.rmem_max: 262144
+          net.core.wmem_max: 262144
+          net.ipv4.tcp_rmem: "4096 87380 33554432"
+          net.ipv4.tcp_wmem: "4096 65536 33554432"
+          net.ipv4.ip_unprivileged_port_start: 80
+          vm.swappiness: 10
+          kernel.keys.maxbytes: 2000000
+          kernel.keys.maxkeys: 2000
+          vm.max_map_count: 262144
+
 
     # - name: Reboot VM to apply changes
     #   ansible.builtin.command: systemctl reboot
