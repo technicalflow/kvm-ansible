@@ -469,6 +469,19 @@
             mode: "0440"
             validate: /usr/sbin/visudo -cf %s
 
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: Skip host — already provisioned
+      when: not is_fresh_install
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
+        - name: End host
+          ansible.builtin.meta: end_host
+
         - name: Purge existing systemd-networkd configuration directory
           ansible.builtin.file:
             path: /etc/systemd/network
@@ -812,7 +825,6 @@
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
-    # libvirt_qemu runs commands via the guest agent, which sets no HOME.
     HOME: /root
   tasks:
     - name: Skip host — already provisioned
