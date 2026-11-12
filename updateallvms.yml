@@ -1,66 +1,199 @@
-- name: Update running KVM VMs via QEMU guest agent socket
+- name: Update running KVM VMs via QEMU guest agent
   hosts: localhost
   connection: local
   gather_facts: no
+  vars:
+    virsh_uri: qemu:///system
+    poll_delay: 5      # seconds between status checks
+    poll_retries: 90    # delay * retries = max wait per VM (15 min)
+    # Limit run, e.g. -e '{"vm_filter": ["web1","db1"]}'
+    vm_filter: []
+    report_dir: "{{ playbook_dir }}/reports"
+    report_file: "{{ report_dir }}/vm-update-{{ now(fmt='%Y%m%d-%H%M%S') }}.txt"
+    # Update command per guest OS id (guest-get-osinfo "id").
+    apt_cmd: >-
+      export DEBIAN_FRONTEND=noninteractive;
+      apt-get update && apt-get -y -o Dpkg::Options::=--force-confold upgrade;
+      rc=$?; [ -f /var/run/reboot-required ] && echo "REBOOT REQUIRED"; exit $rc
+    dnf_cmd: dnf -y update
+    update_cmds:
+      debian: "{{ apt_cmd }}"
+      ubuntu: "{{ apt_cmd }}"
+      freebsd: >-
+        env PAGER=cat freebsd-update --not-running-from-cron fetch install &&
+        env ASSUME_ALWAYS_YES=YES pkg update && env ASSUME_ALWAYS_YES=YES pkg upgrade -y
+      ol: "{{ dnf_cmd }}"
+      centos: "{{ dnf_cmd }}"
+      rhel: "{{ dnf_cmd }}"
+      rocky: "{{ dnf_cmd }}"
+      almalinux: "{{ dnf_cmd }}"
+    el_ids: [ol, centos, rhel, rocky, almalinux]   # dnf needs version >= 8
   tasks:
-    - name: Fetch list of running KVM VMs
-      ansible.builtin.command: virsh -c qemu:///system -q list --state-running --name
+    - name: List running VMs
+      ansible.builtin.command:
+        argv: [virsh, -c, "{{ virsh_uri }}", -q, list, --state-running, --name]
       register: kvm_vms
       changed_when: false
 
-    - name: Query OS info via QEMU guest agent
-      ansible.builtin.command: >
-        virsh -c qemu:///system qemu-agent-command "{{ item }}" '{"execute":"guest-get-osinfo"}'
+    - name: Query OS info via guest agent
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - -c
+          - "{{ virsh_uri }}"
+          - qemu-agent-command
+          - "{{ item }}"
+          - '{"execute":"guest-get-osinfo"}'
       register: os_info
-      loop: "{{ kvm_vms.stdout_lines | reject('match', '^$') | list }}"
+      loop: "{{ kvm_vms.stdout_lines | select | list if not vm_filter else kvm_vms.stdout_lines | select('in', vm_filter) | list }}"
       failed_when: false
       changed_when: false
 
-    # 1. Debian & Ubuntu (apt)
-    - name: Update Debian and Ubuntu VMs
-      ansible.builtin.shell: |
-        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
-          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y"]}}'
-      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"(debian|ubuntu)\"') | list }}"
-      loop_control:
-        pause: 20
-      changed_when: true
+    # Build [{name, cmd}] for VMs with a working agent and a supported OS.
+    - name: Select update targets
+      ansible.builtin.set_fact:
+        vm_targets_json: >-
+          {%- set out = [] -%}
+          {%- for r in os_info.results if r.rc == 0 -%}
+          {%- set os = (r.stdout | from_json).return -%}
+          {%- set old_el = os.id in el_ids and (os['version-id'] | default('0')) | float < 8 -%}
+          {%- if os.id in update_cmds and not old_el -%}
+          {%- set _ = out.append({'name': r.item, 'cmd': update_cmds[os.id]}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        vm_skipped: "{{ os_info.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
 
-    # 2. Legacy CentOS 7 (yum)
-    - name: Update CentOS 7 VMs
-      ansible.builtin.shell: |
-        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
-          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "yum update -y"]}}'
-      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"centos\"') | selectattr('stdout', 'search', '\"version-id\":\"7') | list }}"
-      loop_control:
-        pause: 20
-      register: centos7_exec
-      failed_when:
-        - centos7_exec.rc != 0
-        - "'guest-exec has been disabled' not in centos7_exec.stderr"
-      changed_when: centos7_exec.rc == 0
+    - name: Parse update targets
+      ansible.builtin.set_fact:
+        vm_targets: "{{ vm_targets_json | from_json }}"
 
-    # 3. Modern EL 8, 9, 10: CentOS Stream, Oracle Linux, Rocky, Alma, RHEL (dnf)
-    - name: Update EL 8+ VMs (CentOS 8/9/10, Oracle Linux 8+, Rocky, Alma, RHEL)
-      ansible.builtin.shell: |
-        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
-          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "dnf update -y"]}}'
-      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"(ol|centos|rhel|rocky|almalinux)\"') | list }}"
-      loop_control:
-        pause: 20
-      when: ((item.stdout | from_json).return['version-id'] | default('0')) | float >= 8
-      register: el_exec
-      failed_when:
-        - el_exec.rc != 0
-        - "'guest-exec has been disabled' not in el_exec.stderr"
-      changed_when: el_exec.rc == 0
+    - name: Show targets and skipped VMs
+      ansible.builtin.debug:
+        msg:
+          targets: "{{ vm_targets | map(attribute='name') | list }}"
+          skipped_no_agent: "{{ vm_skipped }}"
 
-    # 4. FreeBSD (pkg)
-    - name: Update FreeBSD VMs
-      ansible.builtin.shell: |
-        virsh -c qemu:///system qemu-agent-command "{{ item.item }}" \
-          '{"execute":"guest-exec", "arguments":{"path":"/bin/sh", "arg":["-c", "env ASSUME_ALWAYS_YES=YES pkg update && env ASSUME_ALWAYS_YES=YES pkg upgrade -y"]}}'
-      loop: "{{ os_info.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'defined') | selectattr('stdout', 'search', '\"id\":\"freebsd\"') | list }}"
+    # Start updates on all VMs at once; guests run in parallel.
+    - name: Start update in guests
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - -c
+          - "{{ virsh_uri }}"
+          - qemu-agent-command
+          - "{{ item.name }}"
+          - >-
+            {{ {'execute': 'guest-exec',
+                'arguments': {'path': '/bin/sh', 'arg': ['-c', item.cmd], 'capture-output': true}} | to_json }}
+      register: started
+      loop: "{{ vm_targets }}"
       loop_control:
-        pause: 20
-      changed_when: true
+        label: "{{ item.name }}"
+      failed_when: false
+      changed_when: started.rc == 0
+
+    # Wait for each guest command to exit.
+    - name: Wait for updates to finish
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - -c
+          - "{{ virsh_uri }}"
+          - qemu-agent-command
+          - "{{ item.item.name }}"
+          - >-
+            {{ {'execute': 'guest-exec-status',
+                'arguments': {'pid': (item.stdout | from_json).return.pid}} | to_json }}
+      register: status
+      loop: "{{ started.results | selectattr('rc', 'equalto', 0) | list }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      until: status.rc != 0 or (status.stdout | from_json).return.exited
+      retries: "{{ poll_retries }}"
+      delay: "{{ poll_delay }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Report per-VM result
+      ansible.builtin.debug:
+        msg:
+          vm: "{{ item.item.item.name }}"
+          exitcode: "{{ (item.stdout | from_json).return.exitcode | default('n/a') }}"
+          output_tail: "{{ ((item.stdout | from_json).return['out-data'] | default('') | b64decode).splitlines()[-5:] }}"
+          errors: "{{ ((item.stdout | from_json).return['err-data'] | default('') | b64decode).splitlines()[-5:] }}"
+      loop: "{{ status.results | selectattr('rc', 'equalto', 0) | list }}"
+      loop_control:
+        label: "{{ item.item.item.name }}"
+
+    # Lists problem VMs with the reason; does not fail the play.
+    - name: Summary of problem VMs
+      ansible.builtin.debug:
+        msg: "{{ (problems | from_json) or 'All VMs updated cleanly' }}"
+      vars:
+        problems: >-
+          {%- set out = [] -%}
+          {%- for r in started.results if r.rc != 0 -%}
+          {%- set _ = out.append(r.item.name ~ ': failed to start: ' ~ (r.stderr | default('') | trim)) -%}
+          {%- endfor -%}
+          {%- for r in status.results -%}
+          {%- if r.rc != 0 -%}
+          {%- set _ = out.append(r.item.item.name ~ ': status query failed: ' ~ (r.stderr | default('') | trim)) -%}
+          {%- else -%}
+          {%- set s = (r.stdout | from_json).return -%}
+          {%- if not s.exited -%}
+          {%- set _ = out.append(r.item.item.name ~ ': timed out waiting for update') -%}
+          {%- elif s.exitcode | default(-1) != 0 -%}
+          {%- set _ = out.append(r.item.item.name ~ ': exited with code ' ~ (s.exitcode | default('n/a'))) -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+
+    - name: Ensure report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+
+    # One entry per VM: no_agent, start_failed, status_query_failed, timed_out, failed or ok.
+    - name: Save per-VM update status to file
+      ansible.builtin.copy:
+        dest: "{{ report_file }}"
+        content: "{{ table }}\n"
+        mode: "0644"
+      vars:
+        table: >-
+          {%- set out = ['%-24s %-20s %-5s %s' | format('VM', 'STATUS', 'EXIT', 'DETAIL')] -%}
+          {%- for e in report | from_json -%}
+          {%- set code = (e.exitcode | string) if e.exitcode is defined and e.exitcode is not none else '-' -%}
+          {%- set _ = out.append('%-24s %-20s %-5s %s' | format(e.vm, e.status, code, e.detail)) -%}
+          {%- endfor -%}
+          {{ out | join('\n') }}
+        report: >-
+          {%- set out = [] -%}
+          {%- for r in os_info.results if r.rc != 0 -%}
+          {%- set _ = out.append({'vm': r.item, 'status': 'no_agent', 'detail': r.stderr | default('') | trim}) -%}
+          {%- endfor -%}
+          {%- for r in started.results if r.rc != 0 -%}
+          {%- set _ = out.append({'vm': r.item.name, 'status': 'start_failed', 'detail': r.stderr | default('') | trim}) -%}
+          {%- endfor -%}
+          {%- for r in status.results -%}
+          {%- if r.rc != 0 -%}
+          {%- set _ = out.append({'vm': r.item.item.name, 'status': 'status_query_failed', 'detail': r.stderr | default('') | trim}) -%}
+          {%- else -%}
+          {%- set s = (r.stdout | from_json).return -%}
+          {%- set st = 'timed_out' if not s.exited else ('ok' if s.exitcode | default(-1) == 0 else 'failed') -%}
+          {%- set _ = out.append({
+                'vm': r.item.item.name,
+                'status': st,
+                'exitcode': s.exitcode | default(none),
+                'detail': ((s['out-data'] | default('') | b64decode).splitlines() +
+                           ((s['err-data'] | default('') | b64decode).splitlines() if st == 'failed' else [])) | select | list | last | default('') | trim}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+
+    - name: Show report location
+      ansible.builtin.debug:
+        msg: "Report saved to {{ report_file }}"

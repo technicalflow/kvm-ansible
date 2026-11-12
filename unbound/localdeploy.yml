@@ -355,6 +355,15 @@
       ansible.builtin.meta: end_host
       when: not is_fresh_install
 
+    - name: Apply FreeBSD base system security/errata updates
+      ansible.builtin.command: freebsd-update --not-running-from-cron fetch install
+      environment:
+        PAGER: cat
+      register: freebsd_update
+      # rc 2 = nothing to install on some releases
+      failed_when: freebsd_update.rc not in [0, 2]
+      changed_when: "'Installing updates' in freebsd_update.stdout"
+
     - name: Upgrade all installed packages OS-agnostic way
       ansible.builtin.pkgng:
         name: "*"
