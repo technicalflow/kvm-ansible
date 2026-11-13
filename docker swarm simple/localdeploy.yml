@@ -106,7 +106,7 @@
       when: not item.stat.exists
 
     - name: Resize the images to desired disk size
-      ansible.builtin.command: "qemu-img resize {{ disk_dir }}/{{ item.vm_name }}.qcow2 {{ disk_size }}"
+      ansible.builtin.command: "qemu-img resize {{ disk_dir }}/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
       register: resize_output
       changed_when: not item.stat.exists
       loop: "{{ destination_disks.results }}"
