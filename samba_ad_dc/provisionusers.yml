@@ -126,3 +126,8 @@
 - name: Run Samba DNS update
   ansible.builtin.command: samba_dnsupdate --verbose
   changed_when: false
+
+- name: Restart samba-ad-dc
+  ansible.builtin.systemd:
+    name: samba-ad-dc
+    state: restarted

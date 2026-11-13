@@ -437,7 +437,6 @@
           - wget
           - sudo
           - ca-certificates
-          - curl
           - gnupg
           - git
         state: present

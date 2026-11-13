@@ -355,6 +355,7 @@
         pod_network_cidr: "{{ pod_network_cidr }}"
         cilium_version: "{{ cilium_version }}"
         cilium_cli_version: "{{ cilium_cli_version }}"
+        remove_master_taint: "{{ remove_master_taint }}"
         timezone: "{{ timezone }}"
         ansible_connection: community.libvirt.libvirt_qemu
         ansible_libvirt_uri: "qemu:///system"
@@ -595,7 +596,6 @@
           - nfs-common
           - cryptsetup
           - dmsetup
-          - cri-tools
           - kubectx
         state: present
         autoclean: true

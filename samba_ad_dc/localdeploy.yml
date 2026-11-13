@@ -457,17 +457,6 @@
     samba_server_fqdn: "{{ samba_hostname }}.{{ samba_domain }}"
     samba_timezone: "Europe/Warsaw"
 
-  handlers:
-    - name: Restart chrony
-      ansible.builtin.systemd:
-        name: chrony
-        state: restarted
-
-    - name: Restart samba-ad-dc
-      ansible.builtin.systemd:
-        name: samba-ad-dc
-        state: restarted
-
   tasks:
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
@@ -656,7 +645,11 @@
                   guest ok = no
                   create mask = 0775
                   directory mask = 0775
-      notify: Restart samba-ad-dc
+
+    - name: Restart samba-ad-dc
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        state: restarted
 
     - name: Create directory for Samba NTP signed socket
       ansible.builtin.file:
@@ -677,7 +670,11 @@
 
           # specify the ntpsigndsocket directory for the Samba AD
           ntpsigndsocket /var/lib/samba/ntp_signd
-      notify: Restart chrony
+
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
 
     - name: Set timezone to {{ samba_timezone }}
       ansible.builtin.command: timedatectl set-timezone {{ samba_timezone }}

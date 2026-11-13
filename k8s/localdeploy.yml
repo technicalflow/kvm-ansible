@@ -1272,7 +1272,7 @@
     - name: Check which VM domains exist
       ansible.builtin.command: "virsh -c qemu:///system dominfo {{ item }}"
       register: teardown_domain_info
-      loop: "{{   teardown_vm_names }}"
+      loop: "{{ teardown_vm_names }}"
       failed_when: false
       changed_when: false
 
