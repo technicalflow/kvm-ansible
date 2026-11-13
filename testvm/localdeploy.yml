@@ -487,7 +487,6 @@
         - unattended-upgrades.service
         - apt-daily.timer
         - apt-daily-upgrade.timer
-        - systemd-timesyncd.service
       failed_when: false
 
     - name: Ensure mount point directory exists

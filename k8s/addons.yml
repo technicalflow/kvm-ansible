@@ -1,9 +1,10 @@
 ---
 - name: Provision Helm, MetalLB, Metrics Server, Traefik, and Longhorn
-  hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
+  hosts: "{{ (groups['k8s_masters'] | default([]))[:1] }}"
   gather_facts: true
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
+    HOME: /root
   vars:
     INSTALLHELM: true
     INSTALLMETALLB: true

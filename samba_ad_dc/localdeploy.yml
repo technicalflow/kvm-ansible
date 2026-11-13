@@ -432,7 +432,8 @@
         timeout: 60
 
 - name: Provision Samba Active Directory Domain Controller (AD DC)
-  hosts: "{{ target_hosts | default('all') }}"
+  # hosts: "{{ target_hosts | default('all') }}"
+  hosts: spawned_vms
   become: true
   vars:
     samba_realm: "HOMELAB.LAB"
@@ -452,7 +453,7 @@
     samba_share_path: "/data"
     samba_dns_server: "{{ samba_ip }}"
     samba_reverse_zone: "50.168.192.in-addr.arpa"
-    samba_reverse_record: "1"
+    samba_reverse_record: "170"
     samba_server_fqdn: "{{ samba_hostname }}.{{ samba_domain }}"
     samba_timezone: "Europe/Warsaw"
 

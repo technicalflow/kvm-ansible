@@ -621,7 +621,7 @@
                 eth0:
                   name: eth0
                   nictype: macvlan
-                  parent: eth0
+                  parent: {{ ansible_facts['default_ipv4']['interface'] }}
                   type: nic
                 root:
                   path: /

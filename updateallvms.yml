@@ -5,11 +5,10 @@
   vars:
     virsh_uri: qemu:///system
     poll_delay: 5      # seconds between status checks
-    poll_retries: 90    # delay * retries = max wait per VM (15 min)
+    poll_retries: 180   # delay * retries = max wait per VM (15 min)
     # Limit run, e.g. -e '{"vm_filter": ["web1","db1"]}'
     vm_filter: []
     report_dir: "{{ playbook_dir }}/reports"
-    report_file: "{{ report_dir }}/vm-update-{{ now(fmt='%Y%m%d-%H%M%S') }}.txt"
     # Update command per guest OS id (guest-get-osinfo "id").
     apt_cmd: >-
       export DEBIAN_FRONTEND=noninteractive;
@@ -29,6 +28,11 @@
       almalinux: "{{ dnf_cmd }}"
     el_ids: [ol, centos, rhel, rocky, almalinux]   # dnf needs version >= 8
   tasks:
+    # Evaluated once; a var would re-run now() on every use.
+    - name: Fix report file name
+      ansible.builtin.set_fact:
+        report_file: "{{ report_dir }}/vm-update-{{ now(fmt='%Y%m%d-%H%M%S') }}.txt"
+
     - name: List running VMs
       ansible.builtin.command:
         argv: [virsh, -c, "{{ virsh_uri }}", -q, list, --state-running, --name]
@@ -63,16 +67,29 @@
           {%- endfor -%}
           {{ out | to_json }}
         vm_skipped: "{{ os_info.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+        # Agent works but OS is not supported (or EL < 8).
+        vm_unsupported_json: >-
+          {%- set out = [] -%}
+          {%- for r in os_info.results if r.rc == 0 -%}
+          {%- set os = (r.stdout | from_json).return -%}
+          {%- set old_el = os.id in el_ids and (os['version-id'] | default('0')) | float < 8 -%}
+          {%- if os.id not in update_cmds or old_el -%}
+          {%- set _ = out.append({'name': r.item, 'os': (os.id | default('?')) ~ ' ' ~ (os['version-id'] | default(''))}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
 
     - name: Parse update targets
       ansible.builtin.set_fact:
         vm_targets: "{{ vm_targets_json | from_json }}"
+        vm_unsupported: "{{ vm_unsupported_json | from_json }}"
 
     - name: Show targets and skipped VMs
       ansible.builtin.debug:
         msg:
           targets: "{{ vm_targets | map(attribute='name') | list }}"
           skipped_no_agent: "{{ vm_skipped }}"
+          skipped_unsupported_os: "{{ vm_unsupported | map(attribute='name') | list }}"
 
     # Start updates on all VMs at once; guests run in parallel.
     - name: Start update in guests
@@ -133,6 +150,9 @@
       vars:
         problems: >-
           {%- set out = [] -%}
+          {%- for u in vm_unsupported -%}
+          {%- set _ = out.append(u.name ~ ': unsupported OS: ' ~ u.os) -%}
+          {%- endfor -%}
           {%- for r in started.results if r.rc != 0 -%}
           {%- set _ = out.append(r.item.name ~ ': failed to start: ' ~ (r.stderr | default('') | trim)) -%}
           {%- endfor -%}
@@ -156,7 +176,7 @@
         state: directory
         mode: "0755"
 
-    # One entry per VM: no_agent, start_failed, status_query_failed, timed_out, failed or ok.
+    # One entry per VM: no_agent, unsupported_os, start_failed, status_query_failed, timed_out, failed or ok.
     - name: Save per-VM update status to file
       ansible.builtin.copy:
         dest: "{{ report_file }}"
@@ -174,6 +194,9 @@
           {%- set out = [] -%}
           {%- for r in os_info.results if r.rc != 0 -%}
           {%- set _ = out.append({'vm': r.item, 'status': 'no_agent', 'detail': r.stderr | default('') | trim}) -%}
+          {%- endfor -%}
+          {%- for u in vm_unsupported -%}
+          {%- set _ = out.append({'vm': u.name, 'status': 'unsupported_os', 'detail': u.os}) -%}
           {%- endfor -%}
           {%- for r in started.results if r.rc != 0 -%}
           {%- set _ = out.append({'vm': r.item.name, 'status': 'start_failed', 'detail': r.stderr | default('') | trim}) -%}

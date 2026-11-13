@@ -375,14 +375,9 @@
         sleep: 5
         timeout: 30
 
-    - name: Skip host — already provisioned
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Configure OS, hostname, user, and network (Day 1 initial setup)
       when: is_fresh_install
@@ -473,101 +468,96 @@
   hosts: spawned_vms
   gather_facts: false
   tasks:
-    - name: Skip host — already provisioned
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
-        - name: Purge existing systemd-networkd configuration directory
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: absent
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
 
-        - name: Ensure clean systemd-networkd directory exists
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: directory
-            owner: root
-            group: root
-            mode: "0755"
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
 
-        - name: Configure first adapter (br0) in systemd-networkd on master node
-          ansible.builtin.copy:
-            dest: /etc/systemd/network/20-br0.network
-            content: |
-              [Match]
-              MACAddress={{ br0_mac }}
+    - name: Configure first adapter (br0) in systemd-networkd on master node
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/20-br0.network
+        content: |
+          [Match]
+          MACAddress={{ br0_mac }}
 
-              [Network]
-              Address={{ br0_ip }}
-              {% for dns in dns_servers %}
-              DNS={{ dns }}
-              {% endfor %}
-              IPv6AcceptRA=no
+          [Network]
+          Address={{ br0_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+          IPv6AcceptRA=no
 
-              [Route]
-              Destination=0.0.0.0/0
-              Gateway={{ br0_gateway_ip }}
-              GatewayOnLink=yes
-              Metric=10
-            owner: root
-            group: root
-            mode: "0644"
-          when: is_master
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ br0_gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
+      when: is_master
 
-        - name: Configure static IP on NAT adapter in systemd-networkd
-          ansible.builtin.copy:
-            dest: /etc/systemd/network/10-k8s-nat.network
-            content: |
-              [Match]
-              MACAddress={{ nat_mac }}
+    - name: Configure static IP on NAT adapter in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-k8s-nat.network
+        content: |
+          [Match]
+          MACAddress={{ nat_mac }}
 
-              [Network]
-              Address={{ static_ip }}
-              {% for dns in dns_servers %}
-              DNS={{ dns }}
-              {% endfor %}
-              IPv6AcceptRA=no
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
+          IPv6AcceptRA=no
 
-              [Route]
-              Destination=0.0.0.0/0
-              Gateway={{ nat_gateway_ip }}
-              GatewayOnLink=yes
-              Metric={{ '100' if is_master else '10' }}
-            owner: root
-            group: root
-            mode: "0644"
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ nat_gateway_ip }}
+          GatewayOnLink=yes
+          Metric={{ '100' if is_master else '10' }}
+        owner: root
+        group: root
+        mode: "0644"
 
-        - name: Ensure systemd-networkd is enabled and restarted to apply network configuration
-          ansible.builtin.systemd:
-            name: systemd-networkd
-            enabled: true
-            state: restarted
+    - name: Ensure systemd-networkd is enabled and restarted to apply network configuration
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: true
+        state: restarted
 
-        # - name: Ensure DNS servers in /etc/resolv.conf
-        #   ansible.builtin.copy:
-        #     dest: /etc/resolv.conf
-        #     content: |
-        #       {% for dns in dns_servers %}
-        #       nameserver {{ dns }}
-        #       {% endfor %}
-        #     owner: root
-        #     group: root
-        #     mode: "0644"
+    # - name: Ensure DNS servers in /etc/resolv.conf
+    #   ansible.builtin.copy:
+    #     dest: /etc/resolv.conf
+    #     content: |
+    #       {% for dns in dns_servers %}
+    #       nameserver {{ dns }}
+    #       {% endfor %}
+    #     owner: root
+    #     group: root
+    #     mode: "0644"
 
-        - name: Display VM Hostname and IP address summary
-          ansible.builtin.debug:
-            msg:
-              - "=========================================="
-              - " VM Provisioning Summary"
-              - " Hostname: {{ vm_name }}"
-              - " Role: {{ 'Master' if is_master else 'Worker' }}"
-              - " NAT IP: {{ static_ip }}"
-              - "=========================================="
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ vm_name }}"
+          - " Role: {{ 'Master' if is_master else 'Worker' }}"
+          - " NAT IP: {{ static_ip }}"
+          - "=========================================="
 
 - name: Install and configure Kubernetes prerequisites on spawned VMs
   hosts: spawned_vms

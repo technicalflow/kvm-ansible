@@ -163,7 +163,7 @@
               </console>
               <input type='mouse' bus='ps2'/>
               <input type='keyboard' bus='ps2'/>
-              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
             </devices>
           </domain>
       when: is_fresh_install

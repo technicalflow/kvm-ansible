@@ -24,6 +24,8 @@
 
     k3s_token: "mandarynka"
     k3s_version: "v1.36.4+k3s1"
+    k3s_cluster_cidr: "172.25.0.0/16"
+    k3s_service_cidr: "10.96.0.0/16"
 
     disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/centos10.qcow2"
@@ -157,7 +159,7 @@
               </console>
               <input type='mouse' bus='ps2'/>
               <input type='keyboard' bus='ps2'/>
-              <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+              <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
             </devices>
           </domain>
       loop: "{{ vms }}"
@@ -206,6 +208,8 @@
         gateway_ip: "{{ gateway_ip }}"
         k3s_token: "{{ k3s_token }}"
         k3s_version: "{{ k3s_version }}"
+        k3s_cluster_cidr: "{{ k3s_cluster_cidr }}"
+        k3s_service_cidr: "{{ k3s_service_cidr }}"
       loop: "{{ vms }}"
       loop_control:
         loop_var: item
@@ -448,7 +452,6 @@
         - "6444"
         - "2379"
         - "2380"
-        - "8472"
         - "10250"
         - "10251"
         - "10252"
@@ -464,6 +467,19 @@
         permanent: true
         immediate: true
         state: enabled
+      become: yes
+
+    # Pod and service CIDRs must be trusted or pod/DNS traffic is dropped (see k3s docs).
+    - name: Trust pod and service CIDRs in firewalld
+      ansible.posix.firewalld:
+        source: "{{ item }}"
+        zone: trusted
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - "{{ k3s_cluster_cidr }}"
+        - "{{ k3s_service_cidr }}"
       become: yes
 
     - name: Reboot VM to apply changes
@@ -499,7 +515,7 @@
         INSTALL_K3S_VERSION="{{ k3s_version }}" \
         INSTALL_K3S_EXEC="server" \
         INSTALL_K3S_SKIP_SELINUX_RPM=true \
-        /opt/k3s.sh --cluster-init --token {{ k3s_token }} --cluster-cidr=172.25.0.0/16 --service-cidr=10.96.0.0/16
+        /opt/k3s.sh --cluster-init --token {{ k3s_token }} --cluster-cidr={{ k3s_cluster_cidr }} --service-cidr={{ k3s_service_cidr }}
       args:
         creates: /etc/rancher/k3s/k3s.yaml
       become: yes
@@ -581,7 +597,7 @@
   hosts: k3s_primary
   gather_facts: false
   environment:
-    KUBECONFIG: /etc/kubernetes/admin.conf
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   tasks:
     - name: Wait for all nodes to be Ready
       ansible.builtin.command: kubectl wait --for=condition=Ready nodes --all --timeout=120s

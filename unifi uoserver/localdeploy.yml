@@ -494,7 +494,9 @@
     - name: Allow SSH in UFW
       community.general.ufw:
         rule: allow
-        name: OpenSSH
+        port: "22"
+        proto: "tcp"
+        comment: "OpenSSH"
 
     - name: Allow UniFi service ports in UFW
       community.general.ufw:

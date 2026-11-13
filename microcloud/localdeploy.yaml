@@ -12,7 +12,7 @@
       - vm_name: "mskladb13micn03"
         static_ip: "192.168.50.173/23"
 
-    vm_memory_kb: 8388608 # 4096 MB each
+    vm_memory_kb: 8388608 # 8192 MB each
     vm_vcpus: 4
     disk_size: "32G"
     extra_disk_size: "60G"
@@ -25,6 +25,7 @@
       - "192.168.50.250"
 
     disk_dir: "/data/VMS"
+    extra_disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
@@ -115,12 +116,12 @@
 
     - name: Check if destination extra disks already exist
       ansible.builtin.stat:
-        path: "/data/VMS/{{ item.vm_name }}_extra.qcow2"
+        path: "{{extra_disk_dir}}/{{ item.vm_name }}_extra.qcow2"
       loop: "{{ vms }}"
       register: destination_extra_disks
 
-    - name: Create extra 60GB disk images for VMs
-      ansible.builtin.command: "qemu-img create -f qcow2 /data/VMS/{{ item.item.vm_name }}_extra.qcow2 {{ extra_disk_size }}"
+    - name: Create extra disk images for VMs
+      ansible.builtin.command: "qemu-img create -f qcow2 {{ extra_disk_dir }}/{{ item.item.vm_name }}_extra.qcow2 {{ extra_disk_size }}"
       loop: "{{ destination_extra_disks.results }}"
       when: not item.stat.exists
 
@@ -172,7 +173,7 @@
               </disk>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
-                <source file='/data/VMS/{{ item.vm_name }}_extra.qcow2'/>
+                <source file='{{ extra_disk_dir }}/{{ item.vm_name }}_extra.qcow2'/>
                 <target dev='vdb' bus='virtio'/>
               </disk>
               <interface type='bridge'>

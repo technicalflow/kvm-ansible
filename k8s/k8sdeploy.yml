@@ -784,6 +784,16 @@
         executable: /bin/bash
       changed_when: true
 
+    # Pin kubelet to the NAT IP; masters also have br0 with the default route.
+    - name: Configure kubelet node IP in /etc/default/kubelet
+      ansible.builtin.copy:
+        dest: /etc/default/kubelet
+        content: |
+          KUBELET_EXTRA_ARGS="--node-ip={{ static_ip.split('/')[0] }}"
+        owner: root
+        group: root
+        mode: "0644"
+
     - name: Restart and enable containerd and kubelet services
       ansible.builtin.systemd:
         name: "{{ item }}"
@@ -829,7 +839,7 @@
         timeout: 60
 
 - name: Initialize Kubernetes control plane on first master node
-  hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
+  hosts: "{{ (groups['k8s_masters'] | default([]))[:1] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
@@ -1089,7 +1099,7 @@
       no_log: true
 
 - name: Join additional master nodes to Kubernetes cluster as control-plane
-  hosts: "k8s_masters:!{{ groups.get('k8s_masters', ['localhost'])[0] }}"
+  hosts: "{{ (groups['k8s_masters'] | default([]))[1:] }}"
   serial: 1
   gather_facts: false
   tasks:
@@ -1191,7 +1201,7 @@
         seconds: 3
 
 - name: Verify Kubernetes cluster status
-  hosts: "{{ groups.get('k8s_masters', ['localhost'])[0] }}"
+  hosts: "{{ (groups['k8s_masters'] | default([]))[:1] }}"
   gather_facts: false
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf

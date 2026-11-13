@@ -34,6 +34,19 @@
       ipaadmin_principal: "{{ ipa_admin_principal }}"
       ipaadmin_password: "{{ ipa_admin_password }}"
 
+  pre_tasks:
+    - name: Require FreeIPA variables (set by localdeploy.yml or pass with -e)
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_principal is defined
+          - ipa_admin_password is defined
+          - ipa_domain is defined
+          - ssh_pub_key_file is defined
+        fail_msg: >-
+          Pass -e ipa_admin_principal=... -e ipa_admin_password=... -e ipa_domain=...
+          -e ssh_pub_key_file=... when running provisionusers.yml standalone.
+        quiet: true
+
   tasks:
     # 1. Manage a FreeIPA Group
     - name: Ensure group 'developers' is present

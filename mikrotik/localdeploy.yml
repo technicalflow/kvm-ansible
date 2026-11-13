@@ -52,7 +52,7 @@
         state: directory
         owner: root
         group: root
-        mode: "0755"
+        mode: "755"
 
     - name: Check if VM domain exists in libvirt
       ansible.builtin.command: "virsh dominfo {{ vm_name }}"

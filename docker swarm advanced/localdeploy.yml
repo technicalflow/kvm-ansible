@@ -556,7 +556,6 @@
 
     - name: Reload sysctl settings
       ansible.builtin.command: sysctl --system
-      when: sysctl_config.changed
 
     # - name: Reboot VM to apply changes
     #   ansible.builtin.command: systemctl reboot

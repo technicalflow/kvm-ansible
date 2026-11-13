@@ -18,7 +18,6 @@
 
     disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/ol9withuefi.qcow2"
-    # disk_path: "/data/VMS/{{ vm_name }}.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
     uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
@@ -672,9 +671,6 @@
 #   ipa dnsrecord-add home.lab @ --mx-rec="10 mail.home.lab."
 #   ipa dnsrecord-add home.lab _imaps._tcp --srv-rec="0 1 993 mail.home.lab."
 #   ipa dnsrecord-add home.lab _submission._tcp --srv-rec="0 1 587 mail.home.lab."
+#
 # Collection Requirement:
-#   ansible-galaxy collection install ansible.posix
-# ==============================================================================
-
-# Required collections:
-# ansible-galaxy collection install community.libvirt ansible.posix
+#   ansible-galaxy collection install community.libvirt ansible.posix freeipa.ansible_freeipa
