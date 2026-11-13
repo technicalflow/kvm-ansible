@@ -17,8 +17,8 @@
       - "192.168.50.250"
     network_mtu: 1500
 
+    disk_dir: "/nvme/vms"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
-    disk_path: "/nvme/vms/{{ vm_name }}.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
     uefi_vars_path: "/var/lib/libvirt/qemu/nvram/{{ vm_name }}_VARS.fd"
@@ -55,7 +55,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /nvme/vms
+        path: "{{ disk_dir }}"
         state: directory
         owner: root
         group: root
@@ -77,13 +77,13 @@
 
     - name: Check if destination image already exists
       ansible.builtin.stat:
-        path: "{{ disk_path }}"
+        path: "{{ disk_dir }}/{{ vm_name }}.qcow2"
       register: destination_disk
 
     - name: Create standalone VM disk from local template
       ansible.builtin.copy:
         src: "{{ template_image_path }}"
-        dest: "{{ disk_path }}"
+        dest: "{{ disk_dir }}/{{ vm_name }}.qcow2"
         remote_src: true
         force: false
         owner: root
@@ -92,12 +92,12 @@
       when: not destination_disk.stat.exists
 
     - name: Resize the image to desired disk size
-      ansible.builtin.command: qemu-img resize {{ disk_path }} {{ disk_size }}
+      ansible.builtin.command: qemu-img resize {{ disk_dir }}/{{ vm_name }}.qcow2 {{ disk_size }}
       register: resize_output
       changed_when: "'Image resized' in resize_output.stdout"
       when: not destination_disk.stat.exists
 
-    - name: Ensure guest agent is enabled in XML
+    - name: Defining Virtual Machine using XML
       community.libvirt.virt:
         command: define
         xml: |
@@ -125,7 +125,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -140,7 +140,7 @@
               <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
-                <source file='{{ disk_path }}'/>
+                <source file='{{ disk_dir }}/{{ vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
               <interface type='bridge'>
@@ -152,7 +152,7 @@
               <channel type='unix'>
                 <source mode='bind'/>
                 <target type='virtio' name='org.qemu.guest_agent.0'/>
-                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
               </channel>
               <serial type='pty'>
                 <target type='isa-serial' port='0'>
@@ -167,6 +167,7 @@
               <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
             </devices>
           </domain>
+      when: is_fresh_install
 
     - name: Configure VM autostart
       community.libvirt.virt:
@@ -185,7 +186,7 @@
       retries: 20
       delay: 3
       changed_when: false
-      become: false
+      # become: false
 
     - name: Add new VM to dynamic inventory (via Out-of-band Channel)
       ansible.builtin.add_host:
@@ -208,16 +209,16 @@
     #      ansible.builtin.pause:
     #        seconds: 30
 
-    - name: Wait for system to become reachable
-      ansible.builtin.wait_for_connection:
-        delay: 10
-        sleep: 5
-        timeout: 60
-
 - name: Provision the spawned VM
   hosts: spawned_vms
   gather_facts: true
   tasks:
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 1
+        sleep: 5
+        timeout: 30
+
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
       when: not is_fresh_install
@@ -244,50 +245,50 @@
     - name: Set hostname to '{{ vm_name }}'
       ansible.builtin.hostname:
         name: "{{ vm_name }}"
-      become: yes
+      # become: true
 
     # - name: Enable serial getty on ttyS0
     #   ansible.builtin.systemd:
     #     name: serial-getty@ttyS0.service
     #     enabled: true
     #     state: started
-    #   become: yes
+    #   become: true
 
     - name: Ensure the user admin exists
       ansible.builtin.user:
         name: "{{ admin_user }}"
         group: users
         groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-        append: yes
+        append: true
         state: present
-        create_home: yes
+        create_home: true
         shell: /bin/bash
         update_password: on_create
         password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
-      become: yes
+      # become: true
 
     - name: Create ssh directory
       ansible.builtin.file:
-        path: /home/{{ admin_user }}/.ssh
+        path: "/home/{{ admin_user }}/.ssh"
         state: directory
         owner: "{{ admin_user }}"
         group: users
         mode: "0700"
-      become: yes
+      # become: true
 
     - name: Add SSH public key for admin user
       ansible.posix.authorized_key:
         user: "{{ admin_user }}"
         state: present
         key: "{{ lookup('file', ssh_pub_key_file) }}"
-      become: yes
+      # become: true
 
     # - name: Remove default cloud users if they exist
     #   ansible.builtin.user:
     #     name: "{{ item }}"
     #     state: absent
     #     remove: yes
-    #   become: yes
+    #   become: true
     #   loop:
     #     - ubuntu
     #     - debian
@@ -299,7 +300,7 @@
         content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
         mode: "0440"
         validate: /usr/sbin/visudo -cf %s
-      become: yes
+      # become: true
 
     - name: Configure sysctl parameters in /etc/sysctl.d/10-ip.conf
       ansible.builtin.copy:
@@ -516,12 +517,12 @@
       async: 1
       poll: 0
       changed_when: true
-      become: true
+      # become: true
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 12
         sleep: 5
-        timeout: 30
+        timeout: 60
 
 # ansible-galaxy collection install community.libvirt ansible.posix

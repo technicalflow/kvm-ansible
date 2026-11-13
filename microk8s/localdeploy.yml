@@ -23,6 +23,7 @@
       - "192.168.50.242"
       - "192.168.50.250"
 
+    disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
@@ -59,7 +60,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /nvme/vms
+        path: "{{ disk_dir }}"
         state: directory
         owner: root
         group: root
@@ -88,14 +89,14 @@
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
-        path: "/nvme/vms/{{ item.vm_name }}.qcow2"
+        path: "{{ disk_dir }}/{{ item.vm_name }}.qcow2"
       loop: "{{ vms }}"
       register: destination_disks
 
     - name: Create standalone VM disks from local template
       ansible.builtin.copy:
         src: "{{ template_image_path }}"
-        dest: "/nvme/vms/{{ item.item.vm_name }}.qcow2"
+        dest: "{{ disk_dir }}/{{ item.item.vm_name }}.qcow2"
         remote_src: true
         force: false
         owner: root
@@ -105,7 +106,7 @@
       when: not item.stat.exists
 
     - name: Resize the images to desired disk size
-      ansible.builtin.command: "qemu-img resize /nvme/vms/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
+      ansible.builtin.command: "qemu-img resize {{ disk_dir }}/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
       register: resize_output
       changed_when: not item.stat.exists
       loop: "{{ destination_disks.results }}"
@@ -139,7 +140,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -154,7 +155,7 @@
               <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
-                <source file='/nvme/vms/{{ item.vm_name }}.qcow2'/>
+                <source file='{{ disk_dir }}/{{ item.vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
               <interface type='bridge'>
@@ -166,7 +167,7 @@
               <channel type='unix'>
                 <source mode='bind'/>
                 <target type='virtio' name='org.qemu.guest_agent.0'/>
-                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
               </channel>
               <serial type='pty'>
                 <target type='isa-serial' port='0'>
@@ -195,6 +196,8 @@
         name: "{{ item.vm_name }}"
         state: running
       loop: "{{ vms }}"
+      loop_control:
+        pause: 5
 
     - name: Ensure guest agent is responding
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
@@ -228,16 +231,16 @@
         loop_var: item
         index_var: loop_idx
 
-- name: Provision and configure OS on spawned VMs sequentially
+- name: Provision and configure spawned VMs sequentially
   hosts: spawned_vms
   serial: 1
   gather_facts: true
   tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
-        delay: 5
+        delay: 1
         sleep: 5
-        timeout: 60
+        timeout: 30
 
     - name: Skip host — already provisioned
       when: not is_fresh_install
@@ -248,111 +251,147 @@
         - name: End host
           ansible.builtin.meta: end_host
 
-    - name: Configure OS, hostname, user, and network (Day 1 initial setup)
-      when: is_fresh_install
-      block:
-        - name: Expand root partition and filesystem
-          ansible.builtin.shell: |
-            ROOT_PART=$(findmnt -n -o SOURCE /)
-            ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
-            ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
-            growpart "$ROOT_DEV" "$ROOT_PART_NUM"
-            FS_TYPE=$(findmnt -n -o FSTYPE /)
-            if [ "$FS_TYPE" = "xfs" ]; then
-              xfs_growfs /
-            else
-              resize2fs "$ROOT_PART"
-            fi
-          args:
-            executable: /bin/bash
-          register: growpart_result
-          changed_when: "'CHANGED' in growpart_result.stdout"
-          failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+    - name: Load required kernel modules and persist across reboots
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop:
+        - br_netfilter
+        - overlay
+        - rbd
 
-        - name: Set hostname to '{{ vm_name }}'
-          ansible.builtin.hostname:
-            name: "{{ vm_name }}"
+    - name: Configure sysctl settings
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/10-kubernetes.conf
+        reload: true
+      loop: "{{ sysctl_settings | dict2items }}"
+      vars:
+        sysctl_settings:
+          net.bridge.bridge-nf-call-ip6tables: 1
+          net.bridge.bridge-nf-call-iptables: 1
+          net.ipv4.ip_forward: 1
+          net.core.rmem_max: 262144
+          net.core.wmem_max: 262144
+          net.ipv4.tcp_rmem: "4096 87380 33554432"
+          net.ipv4.tcp_wmem: "4096 65536 33554432"
+          net.ipv4.ip_unprivileged_port_start: 80
+          vm.swappiness: 10
+          kernel.keys.maxbytes: 2000000
+          kernel.keys.maxkeys: 2000
+          vm.max_map_count: 262144
 
-        - name: Add all cluster VM hostnames and IPs to /etc/hosts
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
-            line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
-            state: present
-          loop: "{{ groups['spawned_vms'] }}"
+    - name: Configure KVM for nested virtualization
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/kvm.conf
+        content: "options kvm_intel nested=1\n"
+        mode: "0644"
 
-        # - name: Configure GRUB kernel cmdline for serial console
-        #   ansible.builtin.lineinfile:
-        #     path: /etc/default/grub
-        #     regexp: '^GRUB_CMDLINE_LINUX='
-        #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
-        #     backrefs: no
-        #   register: grub_serial_console
-        #   become: yes
+    - name: Expand root partition and filesystem
+      ansible.builtin.shell: |
+        ROOT_PART=$(findmnt -n -o SOURCE /)
+        ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+        ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+        growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+        FS_TYPE=$(findmnt -n -o FSTYPE /)
+        if [ "$FS_TYPE" = "xfs" ]; then
+          xfs_growfs /
+        else
+          resize2fs "$ROOT_PART"
+        fi
+      args:
+        executable: /bin/bash
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
 
-        # - name: Rebuild grub config on Debian family
-        #   ansible.builtin.command: update-grub
-        #   when:
-        #     - ansible_os_family == 'Debian'
-        #     - grub_serial_console.changed
-        #   become: yes
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
 
-        # - name: Rebuild grub config on RedHat family
-        #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
-        #   when:
-        #     - ansible_os_family == 'RedHat'
-        #     - grub_serial_console.changed
-        #   become: yes
+    - name: Add all cluster VM hostnames and IPs to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
+        line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
+        state: present
+      loop: "{{ groups['spawned_vms'] }}"
 
-        # - name: Enable serial getty on ttyS0
-        #   ansible.builtin.systemd:
-        #     name: serial-getty@ttyS0.service
-        #     enabled: true
-        #     state: started
-        #   become: yes
+    # - name: Configure GRUB kernel cmdline for serial console
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/default/grub
+    #     regexp: '^GRUB_CMDLINE_LINUX='
+    #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+    #     backrefs: no
+    #   register: grub_serial_console
+    #   become: yes
 
-        - name: Ensure the user admin exists
-          ansible.builtin.user:
-            name: "{{ admin_user }}"
-            group: users
-            groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-            append: yes
-            state: present
-            create_home: yes
-            shell: /bin/bash
-            update_password: on_create
-            password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+    # - name: Rebuild grub config on Debian family
+    #   ansible.builtin.command: update-grub
+    #   when:
+    #     - ansible_os_family == 'Debian'
+    #     - grub_serial_console.changed
+    #   become: yes
 
-        - name: Create ssh directory
-          ansible.builtin.file:
-            path: /home/{{ admin_user }}/.ssh
-            state: directory
-            owner: "{{ admin_user }}"
-            group: users
-            mode: "0700"
+    # - name: Rebuild grub config on RedHat family
+    #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - grub_serial_console.changed
+    #   become: yes
 
-        - name: Add SSH public key for admin user
-          ansible.posix.authorized_key:
-            user: "{{ admin_user }}"
-            state: present
-            key: "{{ lookup('file', ssh_pub_key_file) }}"
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: true
 
-        # - name: Remove default cloud users if they exist
-        #   ansible.builtin.user:
-        #     name: "{{ item }}"
-        #     state: absent
-        #     remove: yes
-        #   loop:
-        #     - ubuntu
-        #     - debian
-        #   when: item != admin_user
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: true
+        state: present
+        create_home: true
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
 
-        - name: Configure passwordless sudo for admin user
-          ansible.builtin.copy:
-            dest: "/etc/sudoers.d/{{ admin_user }}"
-            content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
-            mode: "0440"
-            validate: /usr/sbin/visudo -cf %s
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: "/home/{{ admin_user }}/.ssh"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
+
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
+
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
+
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
 
 - name: Configure static IP using systemd-networkd
   hosts: spawned_vms
@@ -443,7 +482,6 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.apt:
         name:
-          - mc
           - htop
           - curl
           - wget
@@ -518,45 +556,6 @@
         owner: "{{ admin_user }}"
         group: users
 
-    - name: Load required kernel modules and persist across reboots
-      community.general.modprobe:
-        name: "{{ item }}"
-        state: present
-        persistent: present
-      loop:
-        - br_netfilter
-        - overlay
-        - rbd
-
-    - name: Configure sysctl settings
-      ansible.posix.sysctl:
-        name: "{{ item.key }}"
-        value: "{{ item.value }}"
-        state: present
-        sysctl_file: /etc/sysctl.d/10-kubernetes.conf
-        reload: true
-      loop: "{{ sysctl_settings | dict2items }}"
-      vars:
-        sysctl_settings:
-          net.bridge.bridge-nf-call-ip6tables: 1
-          net.bridge.bridge-nf-call-iptables: 1
-          net.ipv4.ip_forward: 1
-          net.core.rmem_max: 262144
-          net.core.wmem_max: 262144
-          net.ipv4.tcp_rmem: "4096 87380 33554432"
-          net.ipv4.tcp_wmem: "4096 65536 33554432"
-          net.ipv4.ip_unprivileged_port_start: 80
-          vm.swappiness: 10
-          kernel.keys.maxbytes: 2000000
-          kernel.keys.maxkeys: 2000
-          vm.max_map_count: 262144
-
-    - name: Configure KVM for nested virtualization
-      ansible.builtin.copy:
-        dest: /etc/modprobe.d/kvm.conf
-        content: "options kvm_intel nested=1\n"
-        mode: "0644"
-
     # - name: Reboot VM to apply changes
     #   ansible.builtin.reboot:
     #     reboot_timeout: 60
@@ -569,7 +568,7 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 15
         sleep: 5
         timeout: 60
 

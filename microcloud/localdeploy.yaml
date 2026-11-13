@@ -24,6 +24,7 @@
       - "192.168.50.242"
       - "192.168.50.250"
 
+    disk_dir: "/data/VMS"
     template_image_path: "/data/ISO/VMIMAGES/KVM/debian13withuefi.qcow2"
     uefi_code_path: "{{ '/usr/share/OVMF/OVMF_CODE_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_CODE.fd' }}"
     uefi_vars_template_path: "{{ '/usr/share/OVMF/OVMF_VARS_4M.fd' if ansible_os_family == 'Debian' else '/usr/share/edk2/ovmf/OVMF_VARS.fd' }}"
@@ -60,7 +61,7 @@
 
     - name: Ensure target disk directory exists
       ansible.builtin.file:
-        path: /data/VMS
+        path: "{{ disk_dir }}"
         state: directory
         owner: root
         group: root
@@ -89,14 +90,14 @@
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
-        path: "/data/VMS/{{ item.vm_name }}.qcow2"
+        path: "{{ disk_dir }}/{{ item.vm_name }}.qcow2"
       loop: "{{ vms }}"
       register: destination_disks
 
     - name: Create standalone VM disks from local template
       ansible.builtin.copy:
         src: "{{ template_image_path }}"
-        dest: "/data/VMS/{{ item.item.vm_name }}.qcow2"
+        dest: "{{ disk_dir }}/{{ item.item.vm_name }}.qcow2"
         remote_src: true
         force: false
         owner: root
@@ -106,7 +107,7 @@
       when: not item.stat.exists
 
     - name: Resize the images to desired disk size
-      ansible.builtin.command: "qemu-img resize /data/VMS/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
+      ansible.builtin.command: "qemu-img resize {{ disk_dir }}/{{ item.item.vm_name }}.qcow2 {{ disk_size }}"
       register: resize_output
       changed_when: not item.stat.exists
       loop: "{{ destination_disks.results }}"
@@ -151,7 +152,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -166,7 +167,7 @@
               <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
                 <driver name='qemu' type='qcow2' cache='writeback'/>
-                <source file='/data/VMS/{{ item.vm_name }}.qcow2'/>
+                <source file='{{ disk_dir }}/{{ item.vm_name }}.qcow2'/>
                 <target dev='vda' bus='virtio'/>
               </disk>
               <disk type='file' device='disk'>
@@ -183,7 +184,7 @@
               <channel type='unix'>
                 <source mode='bind'/>
                 <target type='virtio' name='org.qemu.guest_agent.0'/>
-                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
               </channel>
               <serial type='pty'>
                 <target type='isa-serial' port='0'>
@@ -212,6 +213,8 @@
         name: "{{ item.vm_name }}"
         state: running
       loop: "{{ vms }}"
+      loop_control:
+        pause: 5
 
     - name: Ensure guest agent is responding
       ansible.builtin.command: "virsh -c qemu:///system guestinfo {{ item.vm_name }}"
@@ -244,17 +247,17 @@
         loop_var: item
         index_var: loop_idx
 
-    - name: Wait for system to become reachable
-      ansible.builtin.wait_for_connection:
-        delay: 5
-        sleep: 5
-        timeout: 60
-
 - name: Provision and configure spawned VMs sequentially
   hosts: spawned_vms
   serial: 1
   gather_facts: true
   tasks:
+    - name: Wait for system to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 1
+        sleep: 5
+        timeout: 30
+
     - name: Skip host — already provisioned
       when: not is_fresh_install
       block:
@@ -263,6 +266,40 @@
             msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
         - name: End host
           ansible.builtin.meta: end_host
+
+    - name: Load required kernel modules and persist across reboots
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - name: Configure sysctl parameters in /etc/sysctl.d/10-ip.conf
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/10-ip.conf
+        content: |
+          net.core.rmem_max = 262144
+          net.core.wmem_max = 262144
+          net.ipv4.tcp_rmem = 4096 87380 33554432
+          net.ipv4.tcp_wmem = 4096 65536 33554432
+          net.ipv4.ip_forward = 1
+          net.ipv4.tcp_mtu_probing=1
+          net.ipv4.ip_unprivileged_port_start=80
+          vm.swappiness=10
+          fs.aio-max-nr=524288
+          kernel.keys.maxbytes=2000000
+          kernel.keys.maxkeys=2000
+          vm.max_map_count=262144
+        owner: root
+        group: root
+        mode: "0644"
+      register: sysctl_config
+
+    - name: Reload sysctl settings
+      ansible.builtin.command: sysctl --system
+      when: sysctl_config.changed
 
     - name: Expand root partition and filesystem
       ansible.builtin.shell: |
@@ -299,16 +336,16 @@
         name: "{{ admin_user }}"
         group: users
         groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-        append: yes
+        append: true
         state: present
-        create_home: yes
+        create_home: true
         shell: /bin/bash
         update_password: on_create
         password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
 
     - name: Create ssh directory
       ansible.builtin.file:
-        path: /home/{{ admin_user }}/.ssh
+        path: "/home/{{ admin_user }}/.ssh"
         state: directory
         owner: "{{ admin_user }}"
         group: users
@@ -436,7 +473,6 @@
     - name: Ensure baseline tools are installed
       ansible.builtin.apt:
         name:
-          - mc
           - htop
           - curl
           - wget
@@ -491,7 +527,7 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 15
         sleep: 5
         timeout: 60
 # Required collections on Ansible control node:

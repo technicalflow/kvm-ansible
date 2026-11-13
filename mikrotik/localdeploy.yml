@@ -131,6 +131,10 @@
               <timer name='pit' tickpolicy='delay'/>
               <timer name='hpet' present='no'/>
             </clock>
+            <pm>
+              <suspend-to-mem enabled='no'/>
+              <suspend-to-disk enabled='no'/>
+            </pm>
             <devices>
               <emulator>{{ emulator_path }}</emulator>
               <disk type='file' device='disk'>
@@ -157,7 +161,7 @@
               <channel type='unix'>
                 <source mode='bind'/>
                 <target type='virtio' name='org.qemu.guest_agent.0'/>
-                <address type="virtio-serial" controller="0" bus="0" port="1"/>
+                <address type='virtio-serial' controller='0' bus='0' port='1'/>
               </channel>
               <serial type='pty'>
                 <target type='isa-serial' port='0'>
@@ -177,7 +181,7 @@
     - name: Configure CHR VM autostart
       community.libvirt.virt:
         name: "{{ vm_name }}"
-        autostart: "{{ vm_autostart | bool }}"
+        autostart: "{{ vm_autostart }}"
 
     - name: Start CHR VM
       community.libvirt.virt:
@@ -192,7 +196,7 @@
       ansible.builtin.command: "virsh -c qemu:///system qemu-agent-command {{ vm_name }} '{\"execute\":\"guest-ping\"}'"
       register: agent_ready
       until: agent_ready.rc == 0
-      retries: 3
+      retries: 10
       delay: 5
       timeout: 30
 

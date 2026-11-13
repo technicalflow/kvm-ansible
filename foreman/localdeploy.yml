@@ -125,7 +125,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -207,16 +207,17 @@
     #      ansible.builtin.pause:
     #        seconds: 30
 
+
+- name: Provision the spawned VM
+  hosts: spawned_vms
+  gather_facts: true
+  tasks:
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
         delay: 1
         sleep: 5
         timeout: 30
 
-- name: Provision the spawned VM
-  hosts: spawned_vms
-  gather_facts: true
-  tasks:
     - name: End play if VM was already provisioned
       ansible.builtin.meta: end_host
       when: not is_fresh_install
@@ -266,21 +267,21 @@
     #   when:
     #     - ansible_os_family == 'RedHat'
     #     - grub_serial_console.changed
-    #   become: yes
+    #   become: true
 
     # - name: Enable serial getty on ttyS0
     #   ansible.builtin.systemd:
     #     name: serial-getty@ttyS0.service
     #     enabled: true
     #     state: started
-    #   become: yes
+    #   become: true
 
     - name: Ensure the user admin exists
       ansible.builtin.user:
         name: "{{ admin_user }}"
         group: users
         groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-        append: yes
+        append: true
         state: present
         create_home: true
         shell: /bin/bash
@@ -289,7 +290,7 @@
 
     - name: Create ssh directory
       ansible.builtin.file:
-        path: /home/{{ admin_user }}/.ssh
+        path: "/home/{{ admin_user }}/.ssh"
         state: directory
         owner: "{{ admin_user }}"
         group: users
@@ -386,7 +387,7 @@
       ansible.builtin.meta: end_host
       when: not is_fresh_install
 
-    - name: Upgrade all installed packages OS-agnostic way
+    - name: Upgrade all installed packages
       ansible.builtin.apt:
         name: "*"
         state: latest

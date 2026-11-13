@@ -659,6 +659,54 @@
       ansible.builtin.debug:
         var: docker_node_ls.stdout_lines
 
+- name: Show VM status (only run when explicitly requested with --tags status)
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tags:
+    - never
+    - status
+  vars:
+    num_managers: *num_managers
+    num_workers: *num_workers
+    vm_name_prefix: *vm_name_prefix
+    status_vm_names: []
+  pre_tasks:
+    - name: Build VM names for status
+      ansible.builtin.set_fact:
+        status_vm_names: "{{ status_vm_names + [vm_name_prefix ~ ('%02d' | format(idx + 1))] }}"
+      loop: "{{ range(0, num_managers + num_workers) | list }}"
+      loop_control:
+        loop_var: idx
+  tasks:
+    - name: Query VM state
+      ansible.builtin.command: "virsh -c qemu:///system domstate {{ item }}"
+      register: status_info
+      loop: "{{ status_vm_names }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Display VM status table
+      ansible.builtin.debug:
+        msg: "{{ table.splitlines() }}"
+      vars:
+        table: |
+          {% set rows = [] %}
+          {% for r in status_info.results %}
+          {% set _ = rows.append([r.item, ('manager' if loop.index0 < num_managers else 'worker'), (r.stdout | trim if r.rc == 0 else 'not defined')]) %}
+          {% endfor %}
+          {% set w1 = (['VM' | length] + (rows | map(attribute=0) | map('length') | list)) | max %}
+          {% set w2 = (['Role' | length] + (rows | map(attribute=1) | map('length') | list)) | max %}
+          {% set w3 = (['State' | length] + (rows | map(attribute=2) | map('length') | list)) | max %}
+          {% set sep = '+-' ~ '-' * w1 ~ '-+-' ~ '-' * w2 ~ '-+-' ~ '-' * w3 ~ '-+' %}
+          {{ sep }}
+          | {{ 'VM'.ljust(w1) }} | {{ 'Role'.ljust(w2) }} | {{ 'State'.ljust(w3) }} |
+          {{ sep }}
+          {% for row in rows %}
+          | {{ row[0].ljust(w1) }} | {{ row[1].ljust(w2) }} | {{ row[2].ljust(w3) }} |
+          {% endfor %}
+          {{ sep }}
+
 - name: Start VMs (only run when explicitly requested with --tags startup)
   hosts: localhost
   become: true

@@ -242,186 +242,181 @@
         sleep: 5
         timeout: 30
 
-    - name: Skip host — already provisioned
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
-    - name: Configure OS, hostname, user, and network (Day 1 initial setup)
-      when: is_fresh_install
-      block:
-        - name: Expand root partition and filesystem
-          ansible.builtin.shell: |
-            ROOT_PART=$(findmnt -n -o SOURCE /)
-            ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
-            ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
-            growpart "$ROOT_DEV" "$ROOT_PART_NUM"
-            FS_TYPE=$(findmnt -n -o FSTYPE /)
-            if [ "$FS_TYPE" = "xfs" ]; then
-              xfs_growfs /
-            else
-              resize2fs "$ROOT_PART"
-            fi
-          args:
-            executable: /bin/bash
-          register: growpart_result
-          changed_when: "'CHANGED' in growpart_result.stdout"
-          failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
+    - name: Expand root partition and filesystem
+      ansible.builtin.shell: |
+        ROOT_PART=$(findmnt -n -o SOURCE /)
+        ROOT_DEV=$(echo "$ROOT_PART" | sed 's/p\?[0-9]*$//')
+        ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -o '[0-9]*$')
+        growpart "$ROOT_DEV" "$ROOT_PART_NUM"
+        FS_TYPE=$(findmnt -n -o FSTYPE /)
+        if [ "$FS_TYPE" = "xfs" ]; then
+          xfs_growfs /
+        else
+          resize2fs "$ROOT_PART"
+        fi
+      args:
+        executable: /bin/bash
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when: "growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout"
 
-        - name: Set hostname to '{{ vm_name }}'
-          ansible.builtin.hostname:
-            name: "{{ vm_name }}"
+    - name: Set hostname to '{{ vm_name }}'
+      ansible.builtin.hostname:
+        name: "{{ vm_name }}"
 
-        - name: Add all cluster VM hostnames and IPs to /etc/hosts
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
-            line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
-            state: present
-          loop: "{{ groups['spawned_vms'] }}"
+    - name: Add all cluster VM hostnames and IPs to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ hostvars[item]['static_ip'].split('/')[0] | regex_escape }}\\s+"
+        line: "{{ hostvars[item]['static_ip'].split('/')[0] }} {{ hostvars[item]['vm_name'] }}"
+        state: present
+      loop: "{{ groups['spawned_vms'] }}"
 
-        # - name: Configure GRUB kernel cmdline for serial console
-        #   ansible.builtin.lineinfile:
-        #     path: /etc/default/grub
-        #     regexp: '^GRUB_CMDLINE_LINUX='
-        #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
-        #     backrefs: no
-        #   register: grub_serial_console
-        #   become: yes
+    # - name: Configure GRUB kernel cmdline for serial console
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/default/grub
+    #     regexp: '^GRUB_CMDLINE_LINUX='
+    #     line: 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"'
+    #     backrefs: no
+    #   register: grub_serial_console
+    #   become: yes
 
-        # - name: Rebuild grub config on Debian family
-        #   ansible.builtin.command: update-grub
-        #   when:
-        #     - ansible_os_family == 'Debian'
-        #     - grub_serial_console.changed
-        #   become: yes
+    # - name: Rebuild grub config on Debian family
+    #   ansible.builtin.command: update-grub
+    #   when:
+    #     - ansible_os_family == 'Debian'
+    #     - grub_serial_console.changed
+    #   become: yes
 
-        # - name: Rebuild grub config on RedHat family
-        #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
-        #   when:
-        #     - ansible_os_family == 'RedHat'
-        #     - grub_serial_console.changed
-        #   become: yes
+    # - name: Rebuild grub config on RedHat family
+    #   ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - grub_serial_console.changed
+    #   become: yes
 
-        # - name: Enable serial getty on ttyS0
-        #   ansible.builtin.systemd:
-        #     name: serial-getty@ttyS0.service
-        #     enabled: true
-        #     state: started
-        #   become: yes
+    # - name: Enable serial getty on ttyS0
+    #   ansible.builtin.systemd:
+    #     name: serial-getty@ttyS0.service
+    #     enabled: true
+    #     state: started
+    #   become: true
 
-        - name: Ensure the user admin exists
-          ansible.builtin.user:
-            name: "{{ admin_user }}"
-            group: users
-            groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-            append: yes
-            state: present
-            create_home: true
-            shell: /bin/bash
-            update_password: on_create
-            password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
+    - name: Ensure the user admin exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        group: users
+        groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
+        append: yes
+        state: present
+        create_home: true
+        shell: /bin/bash
+        update_password: on_create
+        password: "{{ lookup('ansible.builtin.password', '/dev/null length=32') | password_hash('sha512') }}"
 
-        - name: Create ssh directory
-          ansible.builtin.file:
-            path: /home/{{ admin_user }}/.ssh
-            state: directory
-            owner: "{{ admin_user }}"
-            group: users
-            mode: "0700"
+    - name: Create ssh directory
+      ansible.builtin.file:
+        path: /home/{{ admin_user }}/.ssh
+        state: directory
+        owner: "{{ admin_user }}"
+        group: users
+        mode: "0700"
 
-        - name: Add SSH public key for admin user
-          ansible.posix.authorized_key:
-            user: "{{ admin_user }}"
-            state: present
-            key: "{{ lookup('file', ssh_pub_key_file) }}"
+    - name: Add SSH public key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_pub_key_file) }}"
 
-        # - name: Remove default cloud users if they exist
-        #   ansible.builtin.user:
-        #     name: "{{ item }}"
-        #     state: absent
-        #     remove: yes
-        #   loop:
-        #     - ubuntu
-        #     - debian
-        #   when: item != admin_user
+    # - name: Remove default cloud users if they exist
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent
+    #     remove: yes
+    #   loop:
+    #     - ubuntu
+    #     - debian
+    #   when: item != admin_user
 
-        - name: Configure passwordless sudo for admin user
-          ansible.builtin.copy:
-            dest: "/etc/sudoers.d/{{ admin_user }}"
-            content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
-            mode: "0440"
-            validate: /usr/sbin/visudo -cf %s
+    - name: Configure passwordless sudo for admin user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
 
-        - name: Purge existing systemd-networkd configuration directory
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: absent
+- name: Configure static IP using systemd-networkd
+  hosts: spawned_vms
+  gather_facts: false
+  tasks:
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
 
-        - name: Ensure clean systemd-networkd directory exists
-          ansible.builtin.file:
-            path: /etc/systemd/network
-            state: directory
-            owner: root
-            group: root
-            mode: "0755"
+    - name: Purge existing systemd-networkd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: absent
 
-        - name: Configure static IP in systemd-networkd
-          ansible.builtin.copy:
-            dest: /etc/systemd/network/10-static.network
-            content: |
-              [Match]
-              Name=e*
+    - name: Ensure clean systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
 
-              [Network]
-              Address={{ static_ip }}
-              {% for dns in dns_servers %}
-              DNS={{ dns }}
-              {% endfor %}
+    - name: Configure static IP in systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-static.network
+        content: |
+          [Match]
+          Name=e*
 
-              IPv6AcceptRA=no
+          [Network]
+          Address={{ static_ip }}
+          {% for dns in dns_servers %}
+          DNS={{ dns }}
+          {% endfor %}
 
-              [Route]
-              Destination=0.0.0.0/0
-              Gateway={{ gateway_ip }}
-              GatewayOnLink=yes
-              Metric=10
-            owner: root
-            group: root
-            mode: "0644"
+          IPv6AcceptRA=no
 
-        - name: Restart systemd-networkd to apply static IP configuration
-          ansible.builtin.systemd:
-            name: systemd-networkd
-            enabled: true
-            state: restarted
+          [Route]
+          Destination=0.0.0.0/0
+          Gateway={{ gateway_ip }}
+          GatewayOnLink=yes
+          Metric=10
+        owner: root
+        group: root
+        mode: "0644"
 
-        - name: Display VM Hostname and IP address summary
-          ansible.builtin.debug:
-            msg:
-              - "=========================================="
-              - " VM Provisioning Summary"
-              - " Hostname: {{ vm_name }}"
-              - " Configured IP: {{ static_ip }}"
-              - "=========================================="
+    - name: Restart systemd-networkd to apply static IP configuration
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: true
+        state: restarted
+
+    - name: Display VM Hostname and IP address summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " VM Provisioning Summary"
+          - " Hostname: {{ vm_name }}"
+          - " Configured IP: {{ static_ip }}"
+          - "=========================================="
 
 - name: Update and install baseline tools on the spawned VMs
   hosts: spawned_vms
   serial: 1
   gather_facts: false
   tasks:
-    - name: Skip host — already provisioned
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Upgrade all installed packages
       ansible.builtin.apt:
