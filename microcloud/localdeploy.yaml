@@ -79,14 +79,14 @@
         is_fresh_install_map: "{{ is_fresh_install_map | default({}) | combine({item.item.vm_name: (item.rc != 0)}) }}"
       loop: "{{ virsh_dominfo.results }}"
 
-    # - name: Stop when all requested VMs already exist
-    #   when: "true not in is_fresh_install_map.values() | list"
-    #   block:
-    #     - name: Display already provisioned message
-    #       ansible.builtin.debug:
-    #         msg: "All requested VMs already exist in libvirt. Nothing to provision."
-    #     - name: End play
-    #       ansible.builtin.meta: end_play
+    - name: Stop when all requested VMs already exist
+      when: "true not in is_fresh_install_map.values() | list"
+      block:
+        - name: Display already provisioned message
+          ansible.builtin.debug:
+            msg: "All requested VMs already exist in libvirt. Nothing to provision."
+        - name: End play
+          ansible.builtin.meta: end_play
 
     - name: Check if destination images already exist
       ansible.builtin.stat:
@@ -258,14 +258,9 @@
         sleep: 5
         timeout: 30
 
-    - name: Skip host — already provisioned
+    - name: End play if VM was already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Load required kernel modules and persist across reboots
       community.general.modprobe:
@@ -477,6 +472,7 @@
           - curl
           - wget
           - gnupg
+          - git
         state: present
 
     - name: Ensure snapd is installed
@@ -527,7 +523,7 @@
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
-        delay: 15
+        delay: 12
         sleep: 5
         timeout: 60
 # Required collections on Ansible control node:

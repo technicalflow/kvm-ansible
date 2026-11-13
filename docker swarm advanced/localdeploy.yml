@@ -274,15 +274,15 @@
   serial: 1
   gather_facts: true
   tasks:
-    - name: Skip host — already provisioned
-      ansible.builtin.meta: end_host
-      when: not is_fresh_install
-
     - name: Wait for system to become reachable
       ansible.builtin.wait_for_connection:
         delay: 1
         sleep: 5
         timeout: 30
+
+    - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
 
     - name: Expand root partition and filesystem
       ansible.builtin.shell: |
@@ -342,7 +342,7 @@
     #     name: serial-getty@ttyS0.service
     #     enabled: true
     #     state: started
-    #   become: yes
+    #   become: true
 
     - name: Ensure the user admin exists
       ansible.builtin.user:
@@ -375,7 +375,7 @@
     #     name: "{{ item }}"
     #     state: absent
     #     remove: yes
-    #   become: yes
+    #   become: true
     #   loop:
     #     - ubuntu
     #     - debian
@@ -411,7 +411,7 @@
 
     - name: Configure static IP in systemd-networkd
       ansible.builtin.copy:
-        dest: /etc/systemd/network/10-static-en.network
+        dest: /etc/systemd/network/10-static.network
         content: |
           [Match]
           Name=e*
@@ -423,6 +423,7 @@
           {% endfor %}
 
           IPv6AcceptRA=no
+
           [Route]
           Destination=0.0.0.0/0
           Gateway={{ gateway_ip }}
@@ -553,6 +554,9 @@
           kernel.keys.maxkeys: 2000
           vm.max_map_count: 262144
 
+    - name: Reload sysctl settings
+      ansible.builtin.command: sysctl --system
+      when: sysctl_config.changed
 
     # - name: Reboot VM to apply changes
     #   ansible.builtin.command: systemctl reboot

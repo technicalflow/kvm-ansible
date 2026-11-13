@@ -244,7 +244,6 @@
             <vcpu placement='static'>{{ item.vm_vcpus }}</vcpu>
             <cpu mode='host-passthrough' check='none'>
               <topology sockets='1' dies='1' clusters='1' cores='{{ item.vm_vcpus }}' threads='1'/>
-              <feature policy='require' name='vmx'/>
             </cpu>
             <os>
               <type arch='x86_64' machine='q35'>hvm</type>
@@ -836,13 +835,8 @@
     KUBECONFIG: /etc/kubernetes/admin.conf
   tasks:
     - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Extract master NAT IP address
       ansible.builtin.set_fact:
@@ -1166,6 +1160,10 @@
   serial: 1
   gather_facts: false
   tasks:
+    - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Check if node has already joined the cluster
       ansible.builtin.stat:
         path: /etc/kubernetes/kubelet.conf

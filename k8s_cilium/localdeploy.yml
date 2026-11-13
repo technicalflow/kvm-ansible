@@ -828,13 +828,8 @@
     HOME: /root
   tasks:
     - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Kubernetes node setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Extract master NAT IP address
       ansible.builtin.set_fact:
@@ -948,6 +943,10 @@
   serial: 1
   gather_facts: false
   tasks:
+    - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
+      when: not is_fresh_install
+
     - name: Check if node has already joined the cluster
       ansible.builtin.stat:
         path: /etc/kubernetes/kubelet.conf

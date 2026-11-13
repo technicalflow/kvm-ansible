@@ -140,7 +140,7 @@
               <acpi/>
               <apic/>
               <smm state='on'/>
-              <ioapic driver="kvm"/>
+              <ioapic driver='kvm'/>
             </features>
             <clock offset='utc'>
               <timer name='rtc' tickpolicy='catchup'/>
@@ -311,7 +311,7 @@
         name: "{{ admin_user }}"
         group: users
         groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo', 'wheel') }}"
-        append: yes
+        append: true
         state: present
         create_home: true
         shell: /bin/bash
@@ -320,7 +320,7 @@
 
     - name: Create ssh directory
       ansible.builtin.file:
-        path: /home/{{ admin_user }}/.ssh
+        path: "/home/{{ admin_user }}/.ssh"
         state: directory
         owner: "{{ admin_user }}"
         group: users
@@ -439,8 +439,9 @@
           - ca-certificates
           - curl
           - gnupg
+          - git
         state: present
-      # become: yes
+      # become: true
 
     # -------------------------------------------------------------------------
     # Docker Service Installation
@@ -502,12 +503,6 @@
         append: yes
       when: admin_user is defined
 
-    # - name: Load bridge netfilter module
-    #   community.general.modprobe:
-    #     name: br_netfilter
-    #     state: present
-    #     persistent: present
-
     - name: Configure sysctl settings
       ansible.posix.sysctl:
         name: "{{ item.key }}"
@@ -529,12 +524,16 @@
           kernel.keys.maxkeys: 2000
           vm.max_map_count: 262144
 
+    - name: Reload sysctl settings
+      ansible.builtin.command: sysctl --system
+      when: sysctl_config.changed
+
     - name: Reboot VM to apply changes
       ansible.builtin.command: systemctl reboot
       async: 1
       poll: 0
       changed_when: true
-      become: true
+      # become: true
 
     - name: Wait for VM to become reachable after reboot
       ansible.builtin.wait_for_connection:
@@ -547,13 +546,8 @@
   gather_facts: false
   tasks:
     - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Extract node IP address
       ansible.builtin.set_fact:
@@ -583,13 +577,8 @@
   gather_facts: false
   tasks:
     - name: Skip host — already provisioned
+      ansible.builtin.meta: end_host
       when: not is_fresh_install
-      block:
-        - name: Display already provisioned message
-          ansible.builtin.debug:
-            msg: "{{ vm_name }} is already provisioned. Skipping Day 1 setup."
-        - name: End host
-          ansible.builtin.meta: end_host
 
     - name: Extract worker IP address
       ansible.builtin.set_fact:
