@@ -426,6 +426,7 @@
           - wget
           - gnupg
           - nfs-utils
+          - nano
         state: present
 
     - name: Reboot VM to apply network changes
@@ -616,10 +617,22 @@
           --auto-forwarders \
           --forwarder={{ ipa_dns_forwarder }} \
           --auto-reverse \
-          --no-host-dns
+          --no-host-dns \
+          --no-dnssec-validation
       args:
         creates: /etc/ipa/default.conf
         executable: /bin/bash
+
+    # - name: Disable DNSSEC validation on IPA DNS
+    #   ansible.builtin.lineinfile:
+    #     path: /etc/named/ipa-options-ext.conf
+    #     regexp: '^\s*(#|//)?\s*dnssec-validation\s'
+    #     line: 'dnssec-validation no;'
+
+    # - name: restart named
+    #   ansible.builtin.service:
+    #     name: named
+    #     state: restarted
 
     - name: Display FreeIPA installation summary
       ansible.builtin.debug:
